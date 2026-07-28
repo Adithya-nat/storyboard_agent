@@ -1,0 +1,22 @@
+# Local Postgres for the storyboard agent.
+# Connect pgAdmin 4 to: host=localhost port=5432 user=storyboard pass=storyboard db=storyboard
+services:
+  postgres:
+    image: postgres:16
+    container_name: storyboard_postgres
+    environment:
+      POSTGRES_USER: storyboard
+      POSTGRES_PASSWORD: storyboard
+      POSTGRES_DB: storyboard
+    ports:
+      - "5432:5432"
+    volumes:
+      - storyboard_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U storyboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  storyboard_pgdata:
