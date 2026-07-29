@@ -12,11 +12,11 @@ pipeline), **Gemini** for image + voice generation, **Postgres** for job/artifac
 POST /storyboard ─▶ job_id
         │  (background: minutes of work)
         ▼
-  script_writer ─▶ designer ─▶ image_gen ─▶ motion ─▶ assembler ─▶ storyboard.mp4
-   (Gemini LLM)    (style bible  (Gemini img,  (ffmpeg: Ken Burns zoom +
-                    + style_ref)  conditioned   crossfades + caption overlay
-                                  on style_ref, + optional voiceover)
-                                  bounded pool)
+  script_writer ─▶ reflection ─▶ designer ─▶ image_gen ─▶ motion ─▶ assembler ─▶ storyboard.mp4
+   (Gemini LLM)     (LLM judge/    (style bible  (Gemini img,  (ffmpeg: Ken Burns zoom +
+                     revise loop)   + style_ref)  conditioned   crossfades + caption overlay
+                                                  on style_ref, + optional voiceover)
+                                                  bounded pool)
         │
         ▼
   Postgres: jobs + artifacts (metadata + file paths only)
@@ -28,6 +28,37 @@ GET  /storyboard/{id}/logs    ─▶ per-stage log lines (paginated; the "expand
 GET  /storyboard/{id}/events  ─▶ SSE: live status + stage + log stream
 GET  /storyboard/{id}/video   ─▶ mp4
 POST /storyboard/{id}/resume  ─▶ continue an interrupted/failed job
+```
+
+**Pipeline graph**, rendered straight from the real LangGraph `StateGraph` via
+`python -m scripts.render_pipeline_diagram` (so it can never drift from the actual node wiring;
+`motion` only appears when `MOTION_ENGINE_ENABLED=true`):
+
+```mermaid
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	script_writer(script_writer)
+	reflection(reflection)
+	designer(designer)
+	image_gen(image_gen)
+	motion(motion)
+	assembler(assembler)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> script_writer;
+	designer --> image_gen;
+	image_gen --> motion;
+	motion --> assembler;
+	reflection --> designer;
+	script_writer --> reflection;
+	assembler --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
 ```
 
 **Consistency (anti-"AI slop"):** the `designer` writes one `style_bible.md` and renders a single
