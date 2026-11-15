@@ -5,11 +5,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Artifact, Job, JobLog, JobStage
+from app.db.models import Artifact, Job, JobLog, JobStage, RunLedger, SpendEvent
 from app.schemas import TERMINAL_STATUSES, JobStatus
 
 
@@ -17,8 +17,10 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def create_job(session: AsyncSession, prompt: str, duration: int) -> Job:
-    job = Job(prompt=prompt, duration=duration, status=JobStatus.QUEUED.value)
+async def create_job(
+    session: AsyncSession, prompt: str, duration: int, style: str = "narrated", language: str = "en"
+) -> Job:
+    job = Job(prompt=prompt, duration=duration, style=style, language=language, status=JobStatus.QUEUED.value)
     session.add(job)
     await session.commit()
     await session.refresh(job)
@@ -161,6 +163,12 @@ async def reap_orphaned_jobs(session: AsyncSession) -> int:
         .where(JobStage.status.in_(["pending", "running"]))
         .values(status="interrupted", ended_at=_utcnow())
     )
+    # ...and the usage ledger, or the dashboard shows the run as "running" forever.
+    await session.execute(
+        update(RunLedger)
+        .where(RunLedger.status.in_(live))
+        .values(status=JobStatus.INTERRUPTED.value, finished_at=_utcnow())
+    )
     await session.commit()
     return result.rowcount or 0
 
@@ -174,9 +182,11 @@ async def delete_expired_jobs(session: AsyncSession, ttl_seconds: int) -> list[s
     tiny for a single-user service, so we filter in Python to dodge cross-DB tz
     comparison quirks on ``created_at``."""
     now = datetime.now(timezone.utc)
-    rows = (await session.execute(select(Job.id, Job.created_at))).all()
+    rows = (await session.execute(select(Job.id, Job.created_at, Job.status))).all()
     expired: list[str] = []
-    for job_id, created in rows:
+    for job_id, created, status in rows:
+        if status == JobStatus.RUNNING.value:  # never delete a film mid-run
+            continue
         if created.tzinfo is None:  # SQLite hands back naive datetimes
             created = created.replace(tzinfo=timezone.utc)
         if now - created >= timedelta(seconds=ttl_seconds):
@@ -331,3 +341,82 @@ async def get_logs(
 
 def is_terminal(status: str) -> bool:
     return status in {s.value for s in TERMINAL_STATUSES}
+
+
+# --------------------------------------------------------------------------- #
+# Spend + run ledger (persistent; never swept)
+# --------------------------------------------------------------------------- #
+async def add_spend_events(session: AsyncSession, job_id: str, events) -> None:
+    for e in events:
+        session.add(SpendEvent(
+            job_id=job_id, stage=e.stage, category=e.category, provider=e.provider,
+            model=e.model, cost_usd=e.cost_usd, units=e.units, created_at=e.at,
+        ))
+    await session.commit()
+
+
+async def set_job_cost(session: AsyncSession, job_id: str, total: float = 0.0, by_stage: dict[str, float] | None = None) -> None:
+    """Job + stage cost = sum of persisted spend events, so resumed runs accumulate correctly."""
+    del total
+    job_total = await session.scalar(select(func.sum(SpendEvent.cost_usd)).where(SpendEvent.job_id == job_id))
+    await session.execute(update(Job).where(Job.id == job_id).values(cost_usd=round(float(job_total or 0.0), 6)))
+    for name in by_stage or {}:
+        stage_total = await session.scalar(
+            select(func.sum(SpendEvent.cost_usd)).where(SpendEvent.job_id == job_id, SpendEvent.stage == name)
+        )
+        await session.execute(
+            update(JobStage).where(JobStage.job_id == job_id, JobStage.name == name).values(cost_usd=round(float(stage_total or 0.0), 6))
+        )
+    await session.commit()
+
+
+async def job_spend_by_category(session: AsyncSession, job_id: str) -> dict[str, float]:
+    rows = await session.execute(
+        select(SpendEvent.category, func.sum(SpendEvent.cost_usd)).where(SpendEvent.job_id == job_id).group_by(SpendEvent.category)
+    )
+    return {c: round(v or 0.0, 6) for c, v in rows.all()}
+
+
+async def upsert_run(session: AsyncSession, job_id: str, **values) -> None:
+    row = await session.get(RunLedger, job_id)
+    if row is None:
+        session.add(RunLedger(job_id=job_id, **values))
+    else:
+        for k, v in values.items():
+            setattr(row, k, v)
+    await session.commit()
+
+
+def month_start(now: datetime | None = None) -> datetime:
+    now = now or _utcnow()
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+async def spend_since(session: AsyncSession, since: datetime) -> float:
+    total = await session.scalar(select(func.sum(SpendEvent.cost_usd)).where(SpendEvent.created_at >= since))
+    return float(total or 0.0)
+
+
+async def runs_since(session: AsyncSession, since: datetime | None) -> list[RunLedger]:
+    q = select(RunLedger).order_by(RunLedger.started_at.desc())
+    if since is not None:
+        q = q.where(RunLedger.started_at >= since)
+    return list((await session.execute(q)).scalars().all())
+
+
+async def spend_events_since(session: AsyncSession, since: datetime | None) -> list[SpendEvent]:
+    q = select(SpendEvent)
+    if since is not None:
+        q = q.where(SpendEvent.created_at >= since)
+    return list((await session.execute(q)).scalars().all())
+
+
+async def spend_events_for_job(session: AsyncSession, job_id: str) -> list[SpendEvent]:
+    return list((await session.execute(select(SpendEvent).where(SpendEvent.job_id == job_id))).scalars().all())
+
+
+async def list_runs(session: AsyncSession, limit: int = 50, before: datetime | None = None) -> list[RunLedger]:
+    q = select(RunLedger).order_by(RunLedger.started_at.desc()).limit(limit)
+    if before is not None:
+        q = q.where(RunLedger.started_at < before)
+    return list((await session.execute(q)).scalars().all())

@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     JSON,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -67,6 +68,9 @@ class Job(Base):
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    style: Mapped[str] = mapped_column(String(16), nullable=False, default="narrated")
+    language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -118,6 +122,7 @@ class JobStage(Base):
     progress_current: Mapped[int | None] = mapped_column(Integer, nullable=True)
     progress_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)  # per-stage total
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -156,3 +161,44 @@ class JobLog(Base):
 Index("ix_artifacts_job_id", Artifact.job_id)          # all artifacts for a job, ordered
 Index("ix_job_stages_job_id", JobStage.job_id)         # all stages for a job
 Index("ix_job_logs_job_id_id", JobLog.job_id, JobLog.id)  # incremental cursor: job_id=? AND id>?
+
+
+# --- Spend history: NOT linked to jobs, so the TTL sweeper never deletes it ---------- #
+class SpendEvent(Base):
+    __tablename__ = "spend_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    category: Mapped[str] = mapped_column(String(16), nullable=False)
+    provider: Mapped[str] = mapped_column(String(16), nullable=False, default="google")
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    units: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class RunLedger(Base):
+    """One row per run (upserted as the run progresses) for the usage dashboard."""
+
+    __tablename__ = "run_ledger"
+
+    job_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    style: Mapped[str] = mapped_column(String(16), nullable=False, default="narrated")
+    language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")
+    duration: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    cost_by_category: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    video_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    images: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    omni_scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fallback_scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    judge_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    runtime_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    models: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

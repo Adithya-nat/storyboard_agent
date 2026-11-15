@@ -4,22 +4,21 @@ version = "0.1.0"
 description = "Agentic service that turns a text prompt into a short-form storyboard video"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "sse-starlette>=2.1",  # SSE framing + keep-alive ping + client-disconnect detection
-    "pydantic>=2.7",
-    "pydantic-settings>=2.3",
-    "langgraph>=1.0",
-    "langgraph-checkpoint-postgres>=2.0",  # resume: prod checkpointer (uses psycopg)
+    "fastapi>=0.162",
+    "uvicorn[standard]>=0.54",
+    "sse-starlette>=3.7",
+    "pydantic>=2.14",
+    "pydantic-settings>=2.14",
+    "langgraph>=1.2.20,<2",
+    "langgraph-checkpoint-postgres>=3.2",
     "psycopg[binary]>=3.1",                # driver for the postgres checkpointer
-    "langchain-core>=0.3.0",
-    "google-genai>=0.3.0",
-    "sqlalchemy[asyncio]>=2.0",
+    "google-genai>=3.2,<4",  # Interactions API calls pin api_version="v1beta"
+    "sqlalchemy[asyncio]>=2.1",
     "asyncpg>=0.29",
     "alembic>=1.13",
     "tenacity>=8.3",
     "python-multipart>=0.0.9",
-    "pillow>=10.3",
+    "pillow>=11",  # + system libraqm for Tamil caption shaping
     "slowapi>=0.1.9",        # per-IP rate limit on the public create endpoint
     "httpx>=0.27",           # Turnstile siteverify (also used by tests)
 ]
@@ -32,6 +31,8 @@ dev = [
     "httpx>=0.27",
     "aiosqlite>=0.20",
     "langgraph-checkpoint-sqlite>=2.0",  # resume checkpointer for sqlite (tests/local dev)
+    "python-dotenv>=1.0",  # live tests + bake-offs read .env
+    "anthropic>=1.0",  # script bake-off only
 ]
 
 [build-system]
@@ -43,4 +44,7 @@ packages = ["app"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = ["live: real paid API calls; run with `pytest -m live` (skipped by default)"]
+addopts = "-m 'not live'"

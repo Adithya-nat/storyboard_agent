@@ -27,6 +27,9 @@ from typing import Annotated, TypedDict
 from app.adapters.gemini import GeminiImageAdapter
 from app.adapters.llm import LLMAdapter
 from app.adapters.motion_engine import MotionEngineClient
+from app.adapters.music import LyriaMusicAdapter
+from app.adapters.omni import OmniVideoAdapter
+from app.adapters.transcribe import TranscribeAdapter
 from app.adapters.tts import GeminiTTSAdapter
 from app.artifacts.store import ArtifactStore
 from app.core.config import Settings
@@ -52,12 +55,26 @@ class MotionClipMeta(TypedDict, total=False):
     pipeline_version: str | None
     attempts: list[dict]
     motion_reason: str | None
+    has_audio: bool  # the clip carries generated audio (Omni)
+
+
+class SceneAudioMeta(TypedDict, total=False):
+    """How one scene is voiced + how long it holds (written by narration / captions)."""
+
+    order: int
+    voice: str          # narrator | on_camera | off_screen | silent
+    path: str | None    # speech WAV for narrator / off_screen scenes (None for on_camera)
+    hold: float         # seconds this scene stays on screen
+    caption: str        # final on-screen caption (transcript-backed for dialogue)
+    transcript: str
 
 
 class StoryboardState(TypedDict, total=False):
     job_id: str
     prompt: str
     duration: int
+    style: str     # narrated | dialogue | mixed
+    language: str  # en | ta
     script_path: str | None
     # Reflection output (Workstream 3): the critique/revise report. The chosen script is
     # written back over script.json in place, so script_path is unchanged.
@@ -71,6 +88,15 @@ class StoryboardState(TypedDict, total=False):
     # Written only by the `motion` node when motion_engine_enabled; absent otherwise.
     motion_clips: list[MotionClipMeta]
     motion_manifest_path: str | None
+    stills_used: list[int]  # scenes the user chose to finish with their still image
+    # Per-scene voicing + holds (narration stage writes narrator scenes; captions stage
+    # finalizes dialogue scenes after motion). Keyed by order.
+    scene_audio: list[SceneAudioMeta]
+    cast_paths: dict[str, list[str]]  # character name -> reference sheet paths
+    music_path: str | None
+    scene_audio_path: str | None
+    publish_path: str | None
+    cover_path: str | None
     video_path: str | None
     narration_path: str | None  # narration track muxed under the video (None = silent)
     # Multiple nodes (designer + image_gen) can emit warnings; the reducer makes
@@ -86,6 +112,20 @@ def frames_for_duration(duration: int, seconds_per_frame: float) -> int:
     if seconds_per_frame <= 0:
         raise ValueError("seconds_per_frame must be > 0")
     return max(1, round(duration / seconds_per_frame))
+
+
+# Dialogue beats run longer than narration beats (people need time to say their lines),
+# so the same runtime holds fewer scenes. Multipliers on seconds_per_frame per style.
+_STYLE_SCENE_SECONDS = {"narrated": 1.0, "mixed": 1.25, "dialogue": 1.5}
+
+
+def scenes_for_duration(duration: int, seconds_per_frame: float, style: str = "narrated") -> int:
+    """Scene count for a style: narrated = 1 per seconds_per_frame (4s -> 60s = 15);
+    mixed = 1 per 1.25x (60s = 12); dialogue = 1 per 1.5x (60s = 10). At least 2 for a
+    dialogue/mixed film so there's a conversation, never zero."""
+    per = seconds_per_frame * _STYLE_SCENE_SECONDS.get(style, 1.0)
+    n = frames_for_duration(duration, per)
+    return max(2, n) if style in ("dialogue", "mixed") else n
 
 
 @dataclass
@@ -110,8 +150,14 @@ class Deps:
     # Motion engine client (per-scene animation). Set by the runner only when
     # settings.motion_engine_enabled; None => the motion node no-ops (degrade).
     motion: MotionEngineClient | None = None
+    # 2026-11: transcription (dialogue captions) + music bed. Optional (None => the
+    # captions stage falls back to the script lines; the music stage skips).
+    transcriber: TranscribeAdapter | None = None
+    music: LyriaMusicAdapter | None = None
+    video: OmniVideoAdapter | None = None  # AI video (None => scenes keep stills)
+    allow_stills: bool = False  # user chose to finish with stills for scenes that have no clip
 
-    def frame_count(self, duration: int) -> int:
+    def frame_count(self, duration: int, style: str = "narrated") -> int:
         if self.max_frames is not None:
             return self.max_frames
-        return frames_for_duration(duration, self.settings.seconds_per_frame)
+        return scenes_for_duration(duration, self.settings.seconds_per_frame, style)

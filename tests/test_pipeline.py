@@ -98,13 +98,12 @@ async def test_pipeline_records_stages_and_logs(stub_video):
     async with get_sessionmaker()() as s:
         stages = await repo.get_stages(s, job.id)
     assert [st.name for st in stages] == [
-        "script_writer",
-        "reflection",
-        "designer",
-        "image_gen",
-        "assembler",
+        "script_writer", "reflection", "designer", "image_gen", "narration",
+        "captions", "music", "assembler", "publish_kit",
     ]
-    assert all(st.status == "succeeded" for st in stages)
+    # Narrated + TTS/music pinned off in tests -> those stages report skipped.
+    skipped = {"narration", "captions", "music"}
+    assert all(st.status == ("skipped" if st.name in skipped else "succeeded") for st in stages)
     img = next(st for st in stages if st.name == "image_gen")
     assert img.progress_current == img.progress_total == 15  # 30s @ 2s/frame
 

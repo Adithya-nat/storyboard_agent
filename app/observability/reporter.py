@@ -47,20 +47,21 @@ class ProgressReporter:
             )
 
     async def record_stage_tokens(self, job_id: str, name: str) -> None:
-        """Persist this stage's running token total (live, at stage end). Reads the
-        bound UsageCollector; no-op if none is bound. Exception-safe: token accounting
-        must never mask a node's own error when called from the wrapper's finally."""
+        """Persist this stage's tokens + spend live at stage end (best-effort)."""
         from app.observability.usage import get_collector
 
         try:
             collector = get_collector()
             if collector is None:
                 return
-            tokens = collector.by_stage.get(name)
-            if tokens:
-                async with self._sm() as s:
-                    await repo.set_stage_tokens(s, job_id, {name: tokens})
-        except Exception:  # noqa: BLE001 - degrade, don't die
+            events = collector.drain_events()
+            async with self._sm() as s:
+                if collector.by_stage.get(name):
+                    await repo.set_stage_tokens(s, job_id, {name: collector.by_stage[name]})
+                if events:
+                    await repo.add_spend_events(s, job_id, events)
+                await repo.set_job_cost(s, job_id, collector.cost_usd, {name: collector.cost_by_stage.get(name, 0.0)})
+        except Exception:  # noqa: BLE001 - accounting never breaks a stage
             pass
 
     # --- intra-stage updates (called by nodes, via the contextvar) --------- #
@@ -77,6 +78,14 @@ class ProgressReporter:
             return
         async with self._sm() as s:
             await repo.end_stage(s, ctx.job_id, ctx.stage, "degraded", message=message)
+
+    async def mark_skipped(self, message: str | None = None) -> None:
+        """The stage doesn't apply to this job (e.g. narration in a pure-dialogue film)."""
+        ctx = current()
+        if ctx is None:
+            return
+        async with self._sm() as s:
+            await repo.end_stage(s, ctx.job_id, ctx.stage, "skipped", message=message)
 
     def log(self, message: str, level: str = "info") -> None:
         """Best-effort, non-blocking. Sync on purpose (just an enqueue) so hot

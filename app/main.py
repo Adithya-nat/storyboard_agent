@@ -29,6 +29,9 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db import repository as repo
 from app.db.session import get_sessionmaker
+from app.api.usage import router as usage_router
+from app.core.images import raqm_available
+from app.core.model_check import validate_models
 from app.graph.checkpoint import setup_checkpointer
 from app.observability import DBLogHandler, LogDrainer, configure_log_queue
 
@@ -98,6 +101,10 @@ async def lifespan(app: FastAPI):
             "checkpointer setup skipped (%s); resume falls back to idempotent re-run", exc
         )
 
+    app.state.model_check = {"checked": False, "reason": "disabled"}
+    if settings.validate_models_on_startup:
+        app.state.model_check = await validate_models(settings)
+
     # Background TTL sweeper: reclaim expired jobs' DB rows + artifact files.
     sweeper_task = asyncio.create_task(_ttl_sweeper(settings))
 
@@ -135,8 +142,15 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.include_router(storyboard_router)
+app.include_router(usage_router)
 
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok"}
+    s = get_settings()
+    return {
+        "status": "ok",
+        "mock_mode": s.mock_mode,
+        "models": getattr(app.state, "model_check", {"checked": False}),
+        "tamil_shaping": raqm_available(),
+    }

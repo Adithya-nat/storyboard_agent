@@ -22,6 +22,12 @@ import threading
 from dataclasses import dataclass, field
 
 from app.observability.context import current
+from app.core.config import get_settings
+from app.observability.cost import SpendEvent, gemini_usage_cost
+from app.observability.spend_rate import get_governor
+
+# Categories whose cost is reserved up front with the spend-rate governor (not re-recorded).
+RESERVED_CATEGORIES = {"video", "image"}
 
 
 @dataclass
@@ -32,7 +38,26 @@ class UsageCollector:
     prompt_tokens: int = 0
     output_tokens: int = 0
     by_stage: dict[str, int] = field(default_factory=dict)
+    # AI spend (2026-11): one SpendEvent per priced provider call, plus running totals.
+    cost_usd: float = 0.0
+    cost_by_stage: dict[str, float] = field(default_factory=dict)
+    events: list[SpendEvent] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def add_spend(self, event: SpendEvent) -> None:
+        with self._lock:  # concurrent executor threads (image_gen, narration)
+            self.events.append(event)
+            self.cost_usd += event.cost_usd
+            if event.stage:
+                self.cost_by_stage[event.stage] = (
+                    self.cost_by_stage.get(event.stage, 0.0) + event.cost_usd
+                )
+
+    def drain_events(self) -> list[SpendEvent]:
+        """Pop every event recorded so far (the runner persists them incrementally)."""
+        with self._lock:
+            out, self.events = self.events, []
+            return out
 
     def add(self, *, prompt: int = 0, output: int = 0, total: int | None = None, stage: str | None = None) -> None:
         amount = total if total is not None else (prompt + output)
@@ -90,3 +115,40 @@ def record_usage(usage_metadata: object) -> None:
     output = _safe_int(getattr(usage_metadata, "candidates_token_count", None))
     total_raw = getattr(usage_metadata, "total_token_count", None)
     record(prompt=prompt, output=output, total=_safe_int(total_raw) if total_raw is not None else None)
+
+
+def record_spend(
+    *,
+    category: str,
+    model: str,
+    cost_usd: float,
+    units: dict[str, float] | None = None,
+    provider: str = "google",
+) -> None:
+    """Record one priced call under the current stage. No-op without a bound collector."""
+    if category not in RESERVED_CATEGORIES:
+        get_governor(get_settings().spend_rate_limit_usd_per_10min).record(float(cost_usd or 0.0))
+    collector = _current.get()
+    if collector is None:
+        return
+    ctx = current()
+    collector.add_spend(
+        SpendEvent(
+            category=category,
+            provider=provider,
+            model=model,
+            cost_usd=float(cost_usd or 0.0),
+            units=dict(units or {}),
+            stage=ctx.stage if ctx else None,
+        )
+    )
+
+
+def record_gemini_call(category: str, model: str, usage_metadata: object) -> None:
+    """Record tokens AND priced spend for one google-genai call (text, image, TTS,
+    transcription). The single entry point adapters use after a real call."""
+    record_usage(usage_metadata)
+    if usage_metadata is None:
+        return
+    cost, units = gemini_usage_cost(model, usage_metadata)
+    record_spend(category=category, model=model, cost_usd=cost, units=units)

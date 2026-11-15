@@ -104,11 +104,23 @@ async def test_status_includes_created_and_expires(client):
 async def test_expired_job_returns_410(client):
     async with get_sessionmaker()() as s:
         job = await repo.create_job(s, "p", 30)
-        old = datetime.now(timezone.utc) - timedelta(hours=2)
+        old = datetime.now(timezone.utc) - timedelta(hours=30)
         await s.execute(update(Job).where(Job.id == job.id).values(created_at=old))
         await s.commit()
     r = await client.get(f"/storyboard/{job.id}")
     assert r.status_code == 410
+
+
+async def test_sweeper_never_deletes_a_running_job(artifact_root):
+    async with get_sessionmaker()() as s:
+        job = await repo.create_job(s, "long film", 60)
+        await repo.set_status(s, job.id, JobStatus.RUNNING)
+        old = datetime.now(timezone.utc) - timedelta(hours=30)
+        await s.execute(update(Job).where(Job.id == job.id).values(created_at=old))
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        assert job.id not in await repo.delete_expired_jobs(s, ttl_seconds=86400)
+        assert await repo.get_job(s, job.id) is not None
 
 
 async def test_delete_expired_jobs_sweeps_db(artifact_root):

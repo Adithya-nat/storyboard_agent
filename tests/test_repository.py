@@ -65,6 +65,21 @@ async def test_reaper_reconciles_dangling_stages(session):
     assert stages["script_writer"].status == "succeeded"  # finished -> untouched
 
 
+async def test_reaper_closes_running_ledger_rows(session):
+    """The usage dashboard must not show a reaped run as 'running' forever."""
+    live = await repo.create_job(session, "p", 30)
+    done = await repo.create_job(session, "q", 30)
+    await repo.upsert_run(session, live.id, prompt="p", status="running")
+    await repo.upsert_run(session, done.id, prompt="q", status="completed")
+
+    await repo.reap_orphaned_jobs(session)
+
+    rows = {r.job_id: r for r in await repo.list_runs(session)}
+    assert rows[live.id].status == "interrupted"
+    assert rows[live.id].finished_at is not None
+    assert rows[done.id].status == "completed"
+
+
 async def test_try_acquire_job_guards_concurrent_runs(session):
     job = await repo.create_job(session, "p", 30)
     # queued -> running: acquired.

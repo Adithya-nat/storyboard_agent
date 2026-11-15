@@ -20,7 +20,8 @@ from app.adapters.tts import (
 )
 from app.adapters.video import concat_offsets, ffmpeg_available, xfade_offsets
 from app.agents import assembler as assembler_mod
-from app.agents.assembler import _add_synced_voiceover, _synthesize_beats, assembler
+from app.agents.assembler import assembler
+from app.agents.narration import voice_lines
 from app.artifacts.store import ArtifactStore
 from app.core.config import Settings
 from app.core.images import render_card
@@ -89,93 +90,86 @@ class _CountingTTS:
         self.calls = 0
         self.dur = dur
 
-    def synthesize(self, text: str) -> bytes:
+    def synthesize(self, text: str, **_kw) -> bytes:
         self.calls += 1
         return silent_wav(self.dur)
 
 
-async def test_synthesize_beats_drives_holds(artifact_root):
+def _lines(frames):
+    return [(f["order"], f["caption"]) for f in frames]
+
+
+async def test_voice_lines_drives_holds(artifact_root):
     settings = _settings(enable_tts=True, narration_floor_seconds=1.5, narration_pad_seconds=0.4)
     tts = _CountingTTS(dur=3.0)
     deps = _deps(artifact_root, "narr-holds", settings, tts=tts)
-    frames = _frames(deps.store)
-
-    beats, warns = await _synthesize_beats(frames, deps)
+    beats, warns = await voice_lines(_lines(_frames(deps.store)), deps)
     assert warns == []
     assert tts.calls == 3
-    # hold = max(floor 1.5, audio 3.0 + pad 0.4) = 3.4
-    assert all(abs(hold - 3.4) < 1e-6 for _, hold in beats)
+    assert all(abs(b["hold"] - 3.4) < 1e-6 for b in beats)  # max(1.5, 3.0 + 0.4)
 
 
-async def test_synthesize_beats_is_idempotent_on_resume(artifact_root):
-    settings = _settings(enable_tts=True)
+async def test_voice_lines_is_idempotent_on_resume(artifact_root):
     tts = _CountingTTS()
-    deps = _deps(artifact_root, "narr-idem", settings, tts=tts)
-    frames = _frames(deps.store)
-
-    await _synthesize_beats(frames, deps)
-    assert tts.calls == 3
-    # Second pass (resume): narration_NN.wav exists -> no new TTS calls.
-    await _synthesize_beats(frames, deps)
+    deps = _deps(artifact_root, "narr-idem", _settings(enable_tts=True), tts=tts)
+    lines = _lines(_frames(deps.store))
+    await voice_lines(lines, deps)
+    await voice_lines(lines, deps)  # resume: narration_NN.wav exists -> no new calls
     assert tts.calls == 3
 
 
 class _FailTTS:
-    def synthesize(self, text: str) -> bytes:
+    def synthesize(self, text: str, **_kw) -> bytes:
         raise PermanentProviderError("tts down")
 
 
-async def test_synthesize_beats_degrades_per_beat(artifact_root):
-    settings = _settings(enable_tts=True, narration_floor_seconds=1.5)
-    deps = _deps(artifact_root, "narr-fail", settings, tts=_FailTTS())
-    frames = _frames(deps.store)
-
-    beats, warns = await _synthesize_beats(frames, deps)
+async def test_voice_lines_degrades_per_line(artifact_root):
+    deps = _deps(artifact_root, "narr-fail", _settings(enable_tts=True), tts=_FailTTS())
+    beats, warns = await voice_lines(_lines(_frames(deps.store)), deps)
     assert len(beats) == 3  # every image still gets a (silent) beat
     assert len(warns) == 3 and all("voiceover failed" in w for w in warns)
 
 
-# --------------------------------------------------------------------------- #
-# Degrade ladder for the synced track (no ffmpeg needed when both raise)
-# --------------------------------------------------------------------------- #
-async def test_voiceover_all_paths_fail_leaves_silent(artifact_root, monkeypatch):
-    settings = _settings(enable_tts=True)
-    deps = _deps(artifact_root, "narr-silent", settings, tts=_CountingTTS())
+async def test_audio_all_paths_fail_leaves_silent(artifact_root, monkeypatch):
+    deps = _deps(artifact_root, "narr-silent", _settings(enable_tts=True), tts=_CountingTTS())
     frames = _frames(deps.store)
-    beats, _ = await _synthesize_beats(frames, deps)
-    offsets = concat_offsets([h for _, h in beats])
+    beats, _ = await voice_lines(_lines(frames), deps)
+    by_order = {b["order"]: b for b in beats}
+    holds = [b["hold"] for b in beats]
 
     async def boom(*a, **k):
         raise RuntimeError("ffmpeg exploded")
 
-    monkeypatch.setattr(assembler_mod, "build_narration_track", boom)
-    monkeypatch.setattr(assembler_mod, "mux_audio", boom)
-
+    for name in ("build_mix", "build_narration_track", "mux_audio"):
+        monkeypatch.setattr(assembler_mod, name, boom)
     warnings: list[str] = []
-    await _add_synced_voiceover(beats, offsets, deps, "/nonexistent/v.mp4", warnings)
-    assert any("synced track failed" in w for w in warnings)
-    assert any("video is silent" in w for w in warnings)
+    track = await assembler_mod._lay_audio(
+        frames, holds, concat_offsets(holds), by_order, None, {"duration": 30}, deps, "/nonexistent/v.mp4", warnings
+    )
+    assert track is None
+    assert any("mix failed" in w for w in warnings)
+    assert any("silent" in w for w in warnings)
 
 
 @_needs_ffmpeg
-async def test_synced_voiceover_falls_back_to_single_track(artifact_root, monkeypatch):
-    """Synced track raises -> the single continuous-track fallback still muxes audio."""
-    settings = _settings(enable_tts=True)
-    deps = _deps(artifact_root, "narr-fallback", settings, tts=_CountingTTS())
+async def test_mix_failure_falls_back_to_speech_track(artifact_root, monkeypatch):
+    deps = _deps(artifact_root, "narr-fallback", _settings(enable_tts=True), tts=_CountingTTS())
     frames = _frames(deps.store)
     out = await assembler({"frames": frames, "duration": 30}, deps)  # builds a real mp4
-    beats, _ = await _synthesize_beats(frames, deps)
-    offsets = concat_offsets([h for _, h in beats])
+    beats, _ = await voice_lines(_lines(frames), deps)
+    holds = [b["hold"] for b in beats]
 
     async def boom(*a, **k):
-        raise RuntimeError("synced builder down")
+        raise RuntimeError("mixer down")
 
-    monkeypatch.setattr(assembler_mod, "build_narration_track", boom)
-
+    monkeypatch.setattr(assembler_mod, "build_mix", boom)
     warnings: list[str] = []
-    await _add_synced_voiceover(beats, offsets, deps, out["video_path"], warnings)
-    assert any("synced track failed" in w for w in warnings)
-    assert not any("silent" in w for w in warnings)  # fallback succeeded
+    track = await assembler_mod._lay_audio(
+        frames, holds, concat_offsets(holds), {b["order"]: b for b in beats}, None,
+        {"duration": 30}, deps, out["video_path"], warnings,
+    )
+    assert track and any("mix failed" in w for w in warnings)
+    assert not any("silent" in w for w in warnings)
 
 
 # --------------------------------------------------------------------------- #

@@ -27,11 +27,15 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.adapters.turnstile import verify_turnstile
+from app.core.images import raqm_available
+from app.observability.budget import budget_status, estimate
 from app.core.config import get_settings
 from app.graph.build import pipeline_stage_names
 from app.db import repository as repo
 from app.db.session import get_session, get_sessionmaker
 from app.schemas import (
+    ResumeRequest,
+    VideoGap,
     ArtifactRef,
     JobCreatedResponse,
     JobStatus,
@@ -42,6 +46,9 @@ from app.schemas import (
     StoryboardContent,
     StoryboardRequest,
     StoryboardScene,
+    CastMember,
+    PublishKit,
+    SceneLine,
 )
 from app.workers.runner import run_job
 
@@ -70,6 +77,7 @@ def _stage_ref(st) -> StageRef:
         progress_current=st.progress_current,
         progress_total=st.progress_total,
         tokens=st.tokens,
+        cost_usd=st.cost_usd,
         started_at=st.started_at,
         ended_at=st.ended_at,
     )
@@ -137,8 +145,36 @@ async def create_storyboard(
         get_settings(), body.turnstile_token, get_remote_address(request)
     ):
         raise HTTPException(status_code=403, detail="Turnstile verification failed")
-    job = await repo.create_job(session, body.prompt, body.duration)
-    background.add_task(run_job, job.id, body.prompt, body.duration)
+    settings = get_settings()
+    style = body.style or settings.default_style
+    language = body.language or settings.default_language
+    if language == "ta" and settings.require_raqm_for_tamil and not raqm_available():
+        raise HTTPException(
+            status_code=422,
+            detail="Tamil captions need libraqm for correct text shaping (brew install libraqm). See SETUP.md.",
+        )
+    omni = True
+    status = await budget_status(session, settings)
+    cost = await estimate(session, style=style, duration=body.duration)
+    if status.month_spent_usd + cost > settings.monthly_budget_usd:
+        cheaper = await estimate(session, style=style, duration=body.duration, omni=False)
+        if (
+            settings.budget_mode == "degrade"
+            and not settings.require_ai_video
+            and status.month_spent_usd + cheaper <= settings.monthly_budget_usd
+        ):
+            omni = False
+        else:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"Monthly AI budget reached: ${status.month_spent_usd:.2f} of "
+                    f"${settings.monthly_budget_usd:.0f} spent; this video needs ~${cost:.2f}. "
+                    "Raise MONTHLY_BUDGET_USD or wait for next month."
+                ),
+            )
+    job = await repo.create_job(session, body.prompt, body.duration, style, language)
+    background.add_task(run_job, job.id, body.prompt, body.duration, False, style, language, omni)
     return JobCreatedResponse(job_id=job.id, status=JobStatus(job.status))
 
 
@@ -146,6 +182,7 @@ async def create_storyboard(
 async def resume_storyboard(
     job_id: str,
     background: BackgroundTasks,
+    body: ResumeRequest | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> JobCreatedResponse:
     """Resume an interrupted/failed job. Idempotent nodes skip work already done.
@@ -165,8 +202,28 @@ async def resume_storyboard(
             detail=f"job already finished (status={job.status}); nothing to resume",
         )
 
-    background.add_task(run_job, job.id, job.prompt, job.duration, True)
+    allow_stills = bool(body and body.allow_stills)
+    background.add_task(run_job, job.id, job.prompt, job.duration, True, job.style, job.language,
+                        allow_stills=allow_stills)
     return JobCreatedResponse(job_id=job.id, status=JobStatus.RUNNING)
+
+
+def _video_gap(job) -> VideoGap | None:
+    """For a film stopped by missing AI clips: how much is filmed, so the user can finish with stills."""
+    if job.status != JobStatus.FAILED.value or "AIVideoUnavailable" not in (job.error or ""):
+        return None
+    root = Path(get_settings().artifact_root) / job.id
+    try:
+        manifest = json.loads((root / "motion_manifest.json").read_text())
+    except (OSError, ValueError):
+        return None
+    total = len([p for p in root.glob("frame_*.png") if p.stem.count(".") == 0])
+    ready = {s["order"] for s in manifest.get("scenes", []) if (root / f"motion_{s['order']:02d}.mp4").exists()}
+    missing = [o for o in range(1, total + 1) if o not in ready]
+    if not ready or not missing:
+        return None
+    reason = "blocked" if "blocked" in job.error else "unavailable"
+    return VideoGap(ready=len(ready), total=total, missing=missing, reason=reason)
 
 
 @router.get("/{job_id}", response_model=JobStatusResponse)
@@ -188,8 +245,12 @@ async def get_storyboard(
         total_tokens=job.total_tokens,
         prompt_tokens=job.prompt_tokens,
         output_tokens=job.output_tokens,
+        cost_usd=round(job.cost_usd or 0.0, 4),
+        style=job.style,
+        language=job.language,
         pipeline=pipeline_stage_names(get_settings()),
         stages=[_stage_ref(st) for st in stages],
+        video_gap=_video_gap(job),
         artifacts=[
             ArtifactRef(
                 id=a.id,
@@ -382,6 +443,8 @@ async def get_storyboard_content(
             return {}
 
     script = _read_json(by_kind.get("script"))
+    scene_audio = {int(a["order"]): a for a in (_read_json(by_kind.get("scene_audio")) or []) if "order" in a}
+    script_scenes = {int(sc["order"]): sc for sc in script.get("scenes", []) if "order" in sc}
     shotlist = _read_json(by_kind.get("shotlist"))
     motion_manifest = _read_json(by_kind.get("motion_manifest"))
     motion_meta_by_order = {
@@ -436,9 +499,15 @@ async def get_storyboard_content(
             by_renderer[renderer] = by_renderer.get(renderer, 0) + 1
         if model:
             by_model[model] = by_model.get(model, 0) + 1
+        audio = scene_audio.get(order, {})
+        src = script_scenes.get(order, {})
         scenes.append(StoryboardScene(
             order=order,
-            narration=narration_by_order.get(order, ""),
+            narration=audio.get("caption") or narration_by_order.get(order, ""),
+            mode=src.get("mode", "narration"),
+            lines=[SceneLine(**ln) for ln in src.get("lines", [])],
+            transcript=audio.get("transcript", "") or "",
+            voice=audio.get("voice") or ("narrator" if "narration" in by_kind else "silent"),
             frame_url=_artifact_url(job_id, f.id),
             video_url=(
                 _artifact_url(job_id, motion_artifact.id)
@@ -458,13 +527,28 @@ async def get_storyboard_content(
 
     style_ref = by_kind.get("style_ref")
     video = by_kind.get("video")
+    cover = by_kind.get("cover")
+    portraits = {a.kind.split(":", 1)[1]: a for a in job.artifacts if a.kind.startswith("cast:")}
+    cast = [
+        CastMember(
+            name=c.get("name", ""), look=c.get("look", ""), voice_description=c.get("voice_description", ""),
+            portrait_url=_artifact_url(job_id, portraits[c.get("name", "").upper()[:26]].id)
+            if c.get("name", "").upper()[:26] in portraits else None,
+        )
+        for c in script.get("characters", [])
+    ]
     return StoryboardContent(
         job_id=job_id,
         status=JobStatus(job.status),
         title=script.get("title", ""),
         logline=script.get("logline", ""),
         style=script.get("style", ""),
+        story_style=job.style,
+        language=job.language,
         duration=job.duration,
+        cover_url=_artifact_url(job_id, cover.id) if cover else None,
+        cost_usd=round(job.cost_usd or 0.0, 4),
+        cast=cast,
         video_url=f"/storyboard/{job_id}/video" if video is not None else None,
         style_ref_url=_artifact_url(job_id, style_ref.id) if style_ref else None,
         total_tokens=job.total_tokens,
@@ -479,3 +563,13 @@ async def get_storyboard_content(
         },
         scenes=scenes,
     )
+
+
+@router.get("/{job_id}/publish", response_model=PublishKit)
+async def get_publish_kit(job_id: str, session: AsyncSession = Depends(get_session)) -> PublishKit:
+    """Post-ready copy (title, hook, per-platform captions + hashtags)."""
+    job = await _load_live_job(session, job_id)
+    art = next((a for a in job.artifacts if a.kind == "publish"), None)
+    if art is None or not os.path.exists(art.path):
+        raise HTTPException(status_code=404 if repo.is_terminal(job.status) else 409, detail="publish kit not ready")
+    return PublishKit.model_validate_json(Path(art.path).read_text(encoding="utf-8"))
