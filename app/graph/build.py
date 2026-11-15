@@ -92,6 +92,11 @@ def _instrument(name: str, seq: int, fn, reporter, deps=None):
             # Flip running -> succeeded ONLY if the node didn't already set a
             # terminal status (image_gen may mark itself 'degraded').
             await reporter.stage_finish(job_id, name)
+            # Live assets: expose what this stage produced right away (getattr:
+            # minimal test reporters don't implement it).
+            publish = getattr(reporter, "publish_artifacts", None)
+            if publish is not None and isinstance(result, dict):
+                await publish(job_id, {**state, **result})
             return result
         except Exception as exc:
             await reporter.stage_fail(job_id, name, exc)

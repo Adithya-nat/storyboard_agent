@@ -98,6 +98,12 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
                     clean_bytes[shot.order] = raw
                     if reporter is not None:
                         reporter.log(f"frame {shot.order}/{total}: generated")
+                        # Live preview: save + publish the clean frame now (Phase C
+                        # re-saves the same bytes, so the end result is unchanged).
+                        frame_name = f"frame_{shot.order:02d}.png"
+                        path = store.save_bytes(frame_name, raw)
+                        store.remove(f"frame_{shot.order:02d}.degraded")
+                        await reporter.publish_frame(shot.order, path)
                 except ProviderError as exc:
                     # The bridge captures this log.warning into job_logs (image_gen
                     # stage) via the contextvar — no explicit reporter.log needed.
