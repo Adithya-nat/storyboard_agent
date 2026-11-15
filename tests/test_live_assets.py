@@ -273,3 +273,18 @@ async def test_sse_emits_assets_version(client, artifact_root):
     text = "\n".join(lines)
     assert "event: assets" in text
     assert version in text
+
+
+async def test_live_reads_brief_and_film_review_from_job_folder(client, artifact_root):
+    async with get_sessionmaker()() as s:
+        job = await repo.create_job(s, "p", 30)
+    store = ArtifactStore(artifact_root, job.id)
+    body = (await client.get(f"/storyboard/{job.id}/live")).json()
+    assert body["brief"] is None and body["review"] is None  # pipelines without these stages
+
+    store.save_json("brief.json", {"format": "short drama", "hook": "A bottle hits the rocks.",
+                                   "logline": "L", "speech": {"era": "modern"}})
+    store.save_json("film_review.json", {"score": 84, "retelling": "A keeper reads a letter.", "coherence": 90})
+    body = (await client.get(f"/storyboard/{job.id}/live")).json()
+    assert body["brief"] == {"format": "short drama", "hook": "A bottle hits the rocks.", "logline": "L"}
+    assert body["review"] == {"score": 84, "retelling": "A keeper reads a letter."}

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes import _artifact_url, _load_live_job
 from app.artifacts.rows import assets_version
+from app.core.config import get_settings
 from app.db.session import get_session
 
 router = APIRouter(prefix="/storyboard", tags=["storyboard"])
@@ -41,6 +43,17 @@ class LiveMedia(BaseModel):
     status: str = "ok"
 
 
+class LiveBrief(BaseModel):
+    format: str = ""
+    hook: str = ""
+    logline: str = ""
+
+
+class LiveReview(BaseModel):
+    score: int | None = None
+    retelling: str = ""
+
+
 class LiveAssets(BaseModel):
     job_id: str
     # Changes whenever the artifact set changes; the SSE ``assets`` event carries
@@ -59,6 +72,10 @@ class LiveAssets(BaseModel):
     music_url: str | None = None
     cover_url: str | None = None
     caption: str | None = None
+    # Creative brief + test-screening review, when this pipeline has those
+    # stages (brief.json / film_review.json in the job folder); else null.
+    brief: LiveBrief | None = None
+    review: LiveReview | None = None
 
 
 def _read_json(art) -> dict:
@@ -102,6 +119,18 @@ def _scores(reflection: dict) -> tuple[dict[str, int], int | None]:
     return scores, overall if isinstance(overall, int) and not isinstance(overall, bool) else None
 
 
+def _brief(raw: dict) -> LiveBrief | None:
+    fields = {k: raw[k].strip() for k in ("format", "hook", "logline") if isinstance(raw.get(k), str)}
+    return LiveBrief(**fields) if any(fields.values()) else None
+
+
+def _review(raw: dict) -> LiveReview | None:
+    score = raw.get("score")
+    score = score if isinstance(score, int) and not isinstance(score, bool) else None
+    retelling = raw.get("retelling") if isinstance(raw.get("retelling"), str) else ""
+    return LiveReview(score=score, retelling=retelling.strip()) if score is not None or retelling else None
+
+
 def _caption(kit: dict) -> str | None:
     for key in ("hook", "title"):
         if isinstance(kit.get(key), str) and kit[key].strip():
@@ -129,6 +158,13 @@ async def get_live_assets(job_id: str, session: AsyncSession = Depends(get_sessi
         ]
 
     script = _read_json(by_kind.get("script"))
+    job_dir = Path(get_settings().artifact_root) / job_id
+
+    def job_json(name: str) -> dict:
+        # Stage outputs that aren't artifact rows (brief, film review) live in
+        # the job folder; read them the same defensive way.
+        return _read_json(SimpleNamespace(path=str(job_dir / name)))
+
     scores, overall = _scores(_read_json(by_kind.get("reflection")))
     portraits = {a.kind.split(":", 1)[1]: a for a in arts if a.kind.startswith("cast:")}
     cast = []
@@ -155,4 +191,6 @@ async def get_live_assets(job_id: str, session: AsyncSession = Depends(get_sessi
         music_url=url("music"),
         cover_url=url("cover"),
         caption=_caption(_read_json(by_kind.get("publish"))),
+        brief=_brief(job_json("brief.json")),
+        review=_review(job_json("film_review.json")),
     )
