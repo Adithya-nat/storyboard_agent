@@ -34,6 +34,14 @@ log = get_logger(__name__)
 # Above this, motion reads as fast-forward; below the cap we window the arc's
 # dynamic middle instead of speeding up further. 2.5x still reads as real video.
 _MOTION_MAX_SPEED = 2.5
+_TRIM_TOLERANCE = 1.5  # a clip up to this much longer than its hold is trimmed, not retimed
+
+
+def _out_size() -> tuple[int, int]:
+    from app.core.config import get_settings
+
+    s = get_settings()
+    return s.video_width, s.video_height
 
 
 class VideoAssemblyError(RuntimeError):
@@ -97,6 +105,7 @@ async def _probe_duration(path: str) -> float | None:
 # --------------------------------------------------------------------------- #
 async def assemble_video(frames: list[tuple[str, float]], output_path: str) -> str:
     """frames: list of (image_path, duration_seconds). Returns output_path."""
+    W, H = _out_size()
     if not frames:
         raise VideoAssemblyError("Cannot assemble video: no frames provided.")
     if not ffmpeg_available():
@@ -122,8 +131,8 @@ async def assemble_video(frames: list[tuple[str, float]], output_path: str) -> s
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
         "-i", str(concat_file),
-        "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,"
-               "pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+        "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
         "-pix_fmt", "yuv420p",
         "-c:v", "libx264",
         str(out),
@@ -219,11 +228,12 @@ async def _render_kenburns_clip(
     # Reach ~1.12x zoom by the last frame; sub-pixel increments on a 2x-upscaled
     # source keep the zoom smooth (the classic zoompan-jitter fix).
     zinc = 0.12 / max(1, total_frames - 1)
+    W, H = _out_size()
     filter_complex = (
-        "[0:v]scale=1440:2560:force_original_aspect_ratio=increase,crop=1440:2560,"
+        f"[0:v]scale={W*2}:{H*2}:force_original_aspect_ratio=increase,crop={W*2}:{H*2},"
         f"zoompan=z='min(zoom+{zinc:.6f},1.12)':d={total_frames}:"
         "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-        f"s=720x1280:fps={fps},setsar=1[zo];"
+        f"s={W}x{H}:fps={fps},setsar=1[zo];"
         "[zo][1:v]overlay=0:0:format=auto,format=yuv420p[v]"
     )
     await _run_ffmpeg([
@@ -264,12 +274,17 @@ async def _render_motion_clip(
     src = await _probe_duration(motion)
     if src is None:
         raise VideoAssemblyError(f"could not probe motion clip duration: {motion}")
-    # Show as much of the arc as the speed cap allows, centered on the dynamic middle.
-    window = min(src, hold * _MOTION_MAX_SPEED)
-    start = max(0.0, (src - window) / 2.0)
-    factor = hold / window  # setpts multiplier: `window` src-seconds -> `hold` out-seconds
+    if hold <= src <= hold + _TRIM_TOLERANCE:
+        # Generated at the scene's length (Omni): play at 1x so lip-sync holds; trim the tail.
+        window, start, factor = hold, 0.0, 1.0
+    else:
+        # Show as much of the arc as the speed cap allows, centered on the dynamic middle.
+        window = min(src, hold * _MOTION_MAX_SPEED)
+        start = max(0.0, (src - window) / 2.0)
+        factor = hold / window
+    W, H = _out_size()
     filter_complex = (
-        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,"
+        f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
         f"fps={fps},trim=start={start:.3f}:duration={window:.3f},"
         f"setpts={factor:.5f}*(PTS-STARTPTS),"
         f"tpad=stop_mode=clone:stop_duration={hold:.3f},trim=duration={hold:.3f},"
@@ -387,3 +402,81 @@ def _xfade_filter(n: int, holds: list[float], d: float) -> tuple[str, str]:
         )
         prev = out_label
     return ";".join(parts), prev
+
+
+async def probe_duration(path: str) -> float | None:
+    return await _probe_duration(path)
+
+
+async def extract_audio(video_path: str, wav_path: str) -> str:
+    """Mono 24 kHz WAV of a clip's audio track."""
+    Path(wav_path).parent.mkdir(parents=True, exist_ok=True)
+    await _run_ffmpeg(["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1", "-ar", "24000", wav_path])
+    return wav_path
+
+
+def _db(gain_db: float) -> str:
+    return f"{10 ** (gain_db / 20):.4f}"
+
+
+async def build_mix(
+    *,
+    speech: list[tuple[str, float]],
+    ambience: list[tuple[str, float]],
+    music: str | None,
+    total_seconds: float,
+    output_path: str,
+    ambience_db: float = -18.0,
+    music_db: float = -14.0,
+    duck_ratio: float = 8.0,
+) -> str:
+    """One stereo-ready track: speech at full level, ambience under it, and a looped
+    score sidechain-ducked whenever anyone speaks. Offsets come from xfade/concat_offsets."""
+    if not ffmpeg_available():
+        raise VideoAssemblyError("ffmpeg not found on PATH. Install ffmpeg.")
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    total = max(0.5, total_seconds)
+    inputs: list[str] = []
+    filters: list[str] = []
+
+    def add(path: str) -> int:
+        inputs.extend(["-i", str(path)])
+        return len(inputs) // 2 - 1
+
+    def bus(items: list[tuple[str, float]], label: str, gain: str = "1") -> str | None:
+        if not items:
+            return None
+        parts = []
+        for path, offset in items:
+            i = add(path)
+            ms = max(0, int(round(offset * 1000)))
+            filters.append(f"[{i}:a]aresample=48000,aformat=channel_layouts=mono,volume={gain},adelay={ms}:all=1[{label}{i}]")
+            parts.append(f"[{label}{i}]")
+        filters.append(f"{''.join(parts)}amix=inputs={len(parts)}:normalize=0[{label}]")
+        return label
+
+    sp = bus(speech, "sp")
+    amb = bus(ambience, "am", _db(ambience_db))
+    mus = None
+    if music:
+        i = add(music)
+        filters.append(
+            f"[{i}:a]aresample=48000,aformat=channel_layouts=mono,aloop=loop=-1:size=2e9,"
+            f"atrim=0:{total:.3f},volume={_db(music_db)},"
+            f"afade=t=in:d=1.0,afade=t=out:st={max(0.0, total - 2.0):.3f}:d=2.0[mraw]"
+        )
+        if sp:
+            # sidechaincompress ends with its shortest input; pad speech to the full runtime.
+            filters.append(f"[sp]apad=whole_dur={total:.3f},asplit=2[spm][spk]")
+            sp = "spm"
+            filters.append(f"[mraw][spk]sidechaincompress=threshold=0.02:ratio={duck_ratio}:attack=20:release=400[mus]")
+        else:
+            filters.append("[mraw]anull[mus]")
+        mus = "mus"
+    buses = [f"[{b}]" for b in (sp, amb, mus) if b]
+    if not buses:
+        raise VideoAssemblyError("nothing to mix")
+    filters.append(f"{''.join(buses)}amix=inputs={len(buses)}:normalize=0,alimiter=limit=0.95,atrim=0:{total:.3f}[out]")
+    await _run_ffmpeg(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters), "-map", "[out]", str(output_path)])
+    log.info("Mixed audio (%d speech, %d ambience, music=%s) -> %s", len(speech), len(ambience), bool(music), output_path)
+    return str(output_path)

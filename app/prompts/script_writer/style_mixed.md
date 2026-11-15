@@ -1,0 +1,2 @@
+<!-- Style block: mixed (narrator frames, key beats are dialogue). -->
+STYLE = MIXED: a narrator frames the story and the key moments cut to the characters speaking on camera. Use mode 'narration' for the setup and resolution beats (and any bridging beats), and mode 'dialogue' for the inciting moment and the climax (roughly 30-50% of scenes). Narration scenes have a 'narration' sentence and no lines; dialogue scenes have 1-4 'lines' by at most 2 visible characters and an empty 'narration'.

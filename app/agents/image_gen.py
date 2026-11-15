@@ -24,11 +24,16 @@ designer's single style_ref.png — the load-bearing consistency lever.
 from __future__ import annotations
 
 import asyncio
+import os
 
 from app.adapters.errors import ProviderError
 from app.core.images import render_card
 from app.core.logging import get_logger
 from app.graph.state import Deps, FrameMeta, StoryboardState
+from pydantic import BaseModel
+
+from app.observability import usage
+from app.prompts import render
 from app.schemas import Shot, Shotlist
 
 log = get_logger(__name__)
@@ -42,9 +47,14 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
     existing_orders = {s.order for s in shots}
     total = len(shots)
 
-    # Load the one style reference once (None => designer fell back to text-only).
-    style_ref_path = state.get("style_ref_path")
-    ref_image = store.load_bytes(style_ref_path) if style_ref_path else None
+    ref_image, sheets = load_refs(store, state)
+    cast_looks = _cast_looks(store, state)
+
+    def refs_for(shot) -> list:
+        return frame_refs(ref_image, sheets, shot.characters)
+
+    def prompt_for(shot) -> str:
+        return frame_prompt(shot.image_prompt, shot.characters, sheets, cast_looks)
 
     sem = asyncio.Semaphore(max(1, deps.settings.image_max_concurrency))
 
@@ -75,10 +85,15 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
                 try:
                     raw = await asyncio.to_thread(
                         deps.image.generate_image,
-                        shot.image_prompt,
-                        ref_image=ref_image,
+                        prompt_for(shot),
+                        refs=refs_for(shot),
                         seed=deps.settings.image_seed,
                     )
+                    if await asyncio.to_thread(_identity_mismatch, deps, raw, shot.characters, sheets, cast_looks):
+                        log.info("frame %s: a character didn't match their reference; re-rendering once", shot.order)
+                        raw = await asyncio.to_thread(
+                            deps.image.generate_image, prompt_for(shot), refs=refs_for(shot), seed=deps.settings.image_seed
+                        )
                     clean_bytes[shot.order] = raw
                     if reporter is not None:
                         reporter.log(f"frame {shot.order}/{total}: generated")
@@ -162,3 +177,100 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
         )
 
     return {"frames": frames, "warnings": warnings}
+
+
+def load_refs(store, state) -> tuple[bytes | None, dict[str, list[bytes]]]:
+    """Style ref + each character's reference sheets (missing => text-only for that part)."""
+    style_ref_path = state.get("style_ref_path")
+    ref_image = store.load_bytes(style_ref_path) if style_ref_path and os.path.exists(style_ref_path) else None
+    sheets = {
+        name: [store.load_bytes(p) for p in paths if os.path.exists(p)]
+        for name, paths in (state.get("cast_paths") or {}).items()
+    }
+    return ref_image, sheets
+
+
+def frame_refs(ref_image: bytes | None, sheets: dict, characters) -> list:
+    out: list = [("Style reference:", ref_image)] if ref_image else []
+    for name in characters:
+        for k, img in enumerate(sheets.get(name.upper(), [])):
+            out.append((f"{name.upper()} — character reference {k + 1}:", img))
+    return out[:14]
+
+
+def frame_prompt(image_prompt: str, characters, sheets: dict, looks: dict) -> str:
+    names = [n.upper() for n in characters if sheets.get(n.upper())]
+    if not names:
+        return image_prompt
+    cast = "\n".join(f"- {n}: {looks.get(n, '')}" for n in names)
+    return image_prompt + "\n\n" + render("image_gen/cast_rules", cast=cast)
+
+
+def render_frame(deps: Deps, state, image_prompt: str, characters) -> bytes:
+    """One cast-conditioned frame (with the identity check + one re-render). Blocking."""
+    ref_image, sheets = load_refs(deps.store, state)
+    looks = _cast_looks(deps.store, state)
+    prompt, refs = frame_prompt(image_prompt, characters, sheets, looks), frame_refs(ref_image, sheets, characters)
+    raw = deps.image.generate_image(prompt, refs=refs, seed=deps.settings.image_seed)
+    if _identity_mismatch(deps, raw, characters, sheets, looks):
+        raw = deps.image.generate_image(prompt, refs=refs, seed=deps.settings.image_seed)
+    return raw
+
+
+def _cast_looks(store, state) -> dict[str, str]:
+    from app.schemas import Script
+
+    if not state.get("script_path"):
+        return {}
+    script = Script.model_validate(store.load_json(state["script_path"]))
+    return {c.name.upper(): c.look for c in script.characters}
+
+
+class _CharMatch(BaseModel):
+    name: str
+    present: bool
+    matches: bool
+
+
+class _IdentityCheck(BaseModel):
+    characters: list[_CharMatch]
+
+
+_client = None
+
+
+def _check_client(settings):
+    """One long-lived client (an inline temporary gets garbage-collected and closed mid-call)."""
+    global _client
+    if _client is None:
+        from app.adapters.genai_client import make_client
+
+        _client = make_client(settings, timeout_seconds=120)
+    return _client
+
+
+def _identity_mismatch(deps: Deps, frame: bytes, characters, sheets: dict, looks: dict) -> bool:
+    """True when a named character in the frame clearly doesn't match their reference sheet."""
+    names = [n.upper() for n in characters if sheets.get(n.upper())]
+    if not names or deps.settings.mock_mode or not deps.settings.image_identity_check:
+        return False
+    try:
+        from google.genai import types
+
+        from app.adapters.gemini import image_mime
+
+        contents: list = [types.Part.from_bytes(data=frame, mime_type=image_mime(frame))]
+        for n in names:
+            contents += [f"{n} reference:", types.Part.from_bytes(data=sheets[n][0], mime_type=image_mime(sheets[n][0]))]
+        contents.append(render("image_gen/identity_check", cast=", ".join(f"{n} ({looks.get(n, '')})" for n in names)))
+        model = deps.settings.image_identity_check_model
+        resp = _check_client(deps.settings).models.generate_content(
+            model=model, contents=contents,
+            config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=_IdentityCheck),
+        )
+        usage.record_gemini_call("text", model, getattr(resp, "usage_metadata", None))
+        verdict = _IdentityCheck.model_validate_json(resp.text)
+        return any(not (c.present and c.matches) for c in verdict.characters)  # every named character is expected
+    except Exception as exc:  # noqa: BLE001 - the check never blocks a frame
+        log.warning("identity check skipped (%s)", exc)
+        return False

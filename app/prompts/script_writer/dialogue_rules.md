@@ -1,0 +1,4 @@
+<!-- Extra DO rules when the film has dialogue. Vars: wps, scene_seconds, scene_words. -->
+  - Dialogue lines are SHORT and SPEAKABLE: each scene has about {{ scene_seconds }} seconds of screen time, so its lines TOGETHER must total about {{ scene_words }} words or fewer (people speak about {{ wps }} words per second). Usually two short lines. The film's total length depends on this budget. Lines reveal character and drive the plot — never narrate what we can see.
+  - Only characters listed in the scene's 'characters' (at most 2) may speak in it.
+  - Speaking characters must CONTRAST clearly in gender or age so their voices never blend (e.g. an older woman and a teenage boy). Start every 'voice_description' with a tag like "FEMALE, 60s:" or "MALE, teen:", then pitch, texture and pace. Don't request regional accents.

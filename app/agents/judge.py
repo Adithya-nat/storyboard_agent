@@ -20,6 +20,7 @@ from collections.abc import Callable
 
 from app.adapters.llm import LLMAdapter
 from app.core.config import Settings, get_settings
+from app.prompts import render
 from app.schemas import JudgeReport, Script, Shotlist
 
 # Weights sum to 1.0. Structure + continuity dominate: they ARE the "no start/mid/end"
@@ -33,47 +34,20 @@ DIMENSION_WEIGHTS: dict[str, float] = {
     "visual_concreteness": 0.10,
 }
 
-_SYSTEM = (
-    "<role>\n"
-    "You are a ruthless but fair story editor for short-form film. You are given a "
-    "STORYBOARD SCRIPT — an ordered list of beats, each with a beat_role, a visual "
-    "description, and a caption (narration) — plus an optional shotlist. Judge whether "
-    "it reads as ONE coherent story with a clear beginning, middle, and end, NOT a set "
-    "of disconnected pretty moments.\n"
-    "</role>\n\n"
-    "<scoring>\n"
-    "Score each dimension 0-100. Be discriminating: reserve 90+ for genuinely "
-    "excellent, 60-75 for solid, 40-60 for mediocre, below 30 for incoherent.\n"
-    "  - structure: a real beginning (setup + hook), middle (causally-linked rising "
-    "development), and end (climax + resolution); does beat_role progress sensibly?\n"
-    "  - continuity: does each beat follow causally from the previous one, with "
-    "consistent characters, setting, and props throughout?\n"
-    "  - clarity: could a first-time viewer follow the story effortlessly from the "
-    "captions and visuals alone?\n"
-    "  - visual_concreteness: are descriptions concrete and filmable (specific subjects, "
-    "actions, framing) rather than vague mood words?\n"
-    "  - payoff: does the ending resolve the hook satisfyingly (no dangling thread, no "
-    "brand-new subject dropped into the final beat)?\n"
-    "</scoring>\n\n"
-    "<also_return>\n"
-    "  - weakest_dimension: the single dimension dragging the story down most.\n"
-    "  - weak_beats: the 'order' numbers of the beats that hurt the story most (may be "
-    "empty).\n"
-    "  - revision_guidance: 2-4 sentences of CONCRETE, actionable fixes a writer could "
-    "apply to raise the weakest dimensions — name the beats and what to change.\n"
-    "  - rationale: one short paragraph justifying the scores.\n"
-    "</also_return>\n\n"
-    "Return STRICT JSON matching the JudgeReport schema. Judge ONLY what is written; do "
-    "not invent content that isn't there — if 'arc' is empty or a beat's 'beat_role' is "
-    "unset, treat that as missing structure and score it down, rather than imagining an "
-    "arc that isn't on the page. Leave 'overall' at 0 — it is computed downstream."
-)
+DIALOGUE_WEIGHT = 0.12  # only when the script has dialogue; the other weights scale down
 
 
-def compute_overall(report: JudgeReport) -> int:
-    """Canonical weighted mean of the five dimensions (0-100). Never trust the model's
-    own arithmetic — recompute so the threshold is stable everywhere."""
-    return round(sum(getattr(report, dim) * w for dim, w in DIMENSION_WEIGHTS.items()))
+def _system(has_dialogue: bool) -> str:
+    base = render("judge/system")
+    return base + "\n\n" + render("judge/dialogue_dimension") if has_dialogue else base
+
+
+def compute_overall(report: JudgeReport, has_dialogue: bool = False) -> int:
+    """Canonical weighted mean (0-100); never trust the model's arithmetic."""
+    base = sum(getattr(report, dim) * w for dim, w in DIMENSION_WEIGHTS.items())
+    if not has_dialogue:
+        return round(base)
+    return round(base * (1 - DIALOGUE_WEIGHT) + report.dialogue * DIALOGUE_WEIGHT)
 
 
 def _format_target(script: Script, shotlist: Shotlist | None) -> str:
@@ -94,6 +68,7 @@ def _mock_factory(score: int) -> Callable[[str], JudgeReport]:
             clarity=score,
             visual_concreteness=score,
             payoff=score,
+            dialogue=score,
             weakest_dimension="structure",
             revision_guidance="(mock) tighten the causal links between beats.",
             rationale="(mock judge)",
@@ -110,11 +85,13 @@ class NarrativeJudge:
         self.llm = llm or LLMAdapter(self.settings)
 
     def score(self, script: Script, shotlist: Shotlist | None = None) -> JudgeReport:
+        has_dialogue = any(sc.mode == "dialogue" and sc.lines for sc in script.scenes)
         report = self.llm.complete_json(
-            system=_SYSTEM,
+            system=_system(has_dialogue),
             user=_format_target(script, shotlist),
             response_model=JudgeReport,
             mock_factory=_mock_factory(self.settings.mock_quality_score),
+            role="judge",
         )
-        report.overall = compute_overall(report)  # canonical, not the model's guess
+        report.overall = compute_overall(report, has_dialogue)
         return report

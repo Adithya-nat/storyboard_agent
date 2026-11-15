@@ -107,17 +107,37 @@ def reset_image_limiter() -> None:
     _reset("image")
 
 
-def get_tts_limiter(rate_per_minute: float) -> TokenBucket:
-    """Return the shared TTS-call limiter — a SEPARATE ceiling from image (TTS is
-    its own 10 RPM per-model quota).
+def get_tts_limiter(rate_per_minute: float, *, model: str = "") -> TokenBucket:
+    """Return the shared TTS-call limiter for ``model`` — a SEPARATE ceiling from image
+    and from every other TTS model (each TTS model is its own 10 RPM quota).
 
     ``capacity=1.0`` on PURPOSE (no burst): a burst can trip a fixed-window
     10/min quota even when the average is safe, and throughput is irrelevant for
     a background narration job — so we err all the way toward margin and pace
     strictly one call at a time."""
-    return _get_or_create("tts", rate_per_minute, capacity=1.0)
+    return _get_or_create(f"tts:{model}" if model else "tts", rate_per_minute, capacity=1.0)
 
 
 def reset_tts_limiter() -> None:
-    """Drop the shared TTS limiter (tests: isolate rate state between cases)."""
-    _reset("tts")
+    """Drop every TTS limiter (tests: isolate rate state between cases)."""
+    with _lock:
+        for name in [n for n in _buckets if n == "tts" or n.startswith("tts:")]:
+            _buckets.pop(name, None)
+
+
+def get_text_limiter(rate_per_minute: float) -> TokenBucket:
+    """Shared limiter for ALL text-model calls (script, reflection, judge, designer,
+    publish kit). Gemini 4 is 30 RPM on this account, so the default 25 keeps margin;
+    a small burst (capacity = max(1, rpm/10)) keeps the reflection loop snappy."""
+    return _get_or_create("text", rate_per_minute)
+
+
+def get_named_limiter(name: str, rate_per_minute: float, *, capacity: float | None = None) -> TokenBucket:
+    """Generic named bucket (e.g. one per model for transcription / music)."""
+    return _get_or_create(name, rate_per_minute, capacity=capacity)
+
+
+def reset_all_limiters() -> None:
+    """Drop every bucket (tests)."""
+    with _lock:
+        _buckets.clear()

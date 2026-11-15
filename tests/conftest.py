@@ -34,6 +34,25 @@ os.environ["LOG_POLL_INTERVAL_SECONDS"] = "0.02"
 # to localhost:8090, even if a developer's real .env enables it (os.environ wins
 # over .env in pydantic-settings). Belt-and-braces with the code default (False).
 os.environ["MOTION_ENGINE_ENABLED"] = "false"
+# AI video is the prod default; tests use the legacy engine path (off) unless they opt in.
+os.environ["VIDEO_PROVIDER"] = "engine"
+# --- 2026-11 hermetic pins: a developer's real .env must not change test behaviour ---
+# Legacy tests encode 1 frame / 2s; the new cinematic 4s default has its own test.
+os.environ["SECONDS_PER_FRAME"] = "2.0"
+# New paid stages default ON in prod; pinned OFF so the pipeline tests stay on the
+# exact-duration silent path. Dedicated tests opt back in via explicit Settings(...).
+os.environ["MUSIC_ENABLED"] = "false"
+# Legacy video/caption tests assert burned-in captions; prod default is off.
+os.environ["BURN_SUBTITLES"] = "true"
+# Legacy video tests assert 720x1280; production renders 1080x1920.
+os.environ["VIDEO_WIDTH"] = "720"
+os.environ["VIDEO_HEIGHT"] = "1280"
+os.environ["VALIDATE_MODELS_ON_STARTUP"] = "false"
+os.environ["NARRATOR_VOICE_ID"] = ""
+os.environ["DEFAULT_STYLE"] = "narrated"
+os.environ["DEFAULT_LANGUAGE"] = "en"
+# The budget guard reads persistent spend; a generous cap keeps unrelated tests clear of 402s.
+os.environ["MONTHLY_BUDGET_USD"] = "1000000"
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import get_engine, get_sessionmaker  # noqa: E402

@@ -38,7 +38,7 @@ class _ScriptedLLM:
         self.judge_calls = 0
         self.revise_calls = 0
 
-    def complete_json(self, *, system, user, response_model, mock_factory):
+    def complete_json(self, *, system, user, response_model, mock_factory, role="script"):
         if response_model is JudgeReport:
             self.judge_calls += 1
             if self.raise_judge_on == self.judge_calls:

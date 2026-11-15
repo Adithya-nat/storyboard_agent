@@ -18,8 +18,11 @@ Idempotent (resume): a ``motion_NN.mp4`` already on disk is reused, never re-bil
 from __future__ import annotations
 
 import asyncio
+import math
 
 from app.core.logging import get_logger
+from app.observability import usage
+from app.schemas import Scene, Script
 from app.graph.state import Deps, MotionClipMeta, StoryboardState
 
 log = get_logger(__name__)
@@ -61,6 +64,10 @@ async def _run(state: StoryboardState, deps: Deps, frames: list) -> StoryboardSt
         return {"motion_clips": [], "warnings": [f"motion: {msg}"]}
 
     beat_by_order = _load_beats(store, state)
+    script = Script.model_validate(store.load_json(state["script_path"])) if state.get("script_path") else None
+    scene_by_order = {sc.order: sc for sc in (script.scenes if script else [])}
+    voices = {c.name.upper(): c.voice_description for c in (script.characters if script else [])}
+    hold_by_order = {a["order"]: a.get("hold") for a in state.get("scene_audio") or []}
     prompt_by_order, narr_by_order = _load_shots(store, state)
     min_order = frames[0]["order"]
     policy = health.get("policy") or "legacy"
@@ -118,7 +125,9 @@ async def _run(state: StoryboardState, deps: Deps, frames: list) -> StoryboardSt
                         "beat_role": beat_by_order.get(order, ""),
                         "hero_hint": order == min_order
                         or beat_by_order.get(order, "").strip().lower() == "climax",
-                        "duration_hint": deps.settings.motion_clip_seconds,
+                        "duration_hint": clip_seconds(hold_by_order.get(order), deps.settings.motion_clip_seconds),
+                        "language": state.get("language") or "en",
+                        **_dialogue_meta(scene_by_order.get(order), voices),
                     }
                     image = store.load_bytes(frame["path"])
                     task, data = await _animate_one(deps, image, meta)
@@ -152,7 +161,9 @@ async def _run(state: StoryboardState, deps: Deps, frames: list) -> StoryboardSt
                         pipeline_version=task.get("pipeline_version"),
                         attempts=attempts,
                         motion_reason=reason,
+                        has_audio=bool(task.get("has_audio")),
                     )
+                    _record_cost(task)
                     if reporter is not None:
                         reporter.log(f"scene {order}/{total}: animated ({tier})")
             except Exception as exc:  # noqa: BLE001 - degrade this scene only
@@ -261,3 +272,33 @@ def _load_shots(store, state: StoryboardState) -> tuple[dict[int, str], dict[int
         return prompts, narr
     except Exception:  # noqa: BLE001
         return {}, {}
+
+
+def clip_seconds(hold: float | None, default: float) -> int:
+    """Whole seconds for a clip covering ``hold`` (Omni accepts 3-15s)."""
+    return int(min(15, max(3, math.ceil(hold if hold else default))))
+
+
+def _dialogue_meta(scene: Scene | None, voices: dict[str, str]) -> dict:
+    if scene is None:
+        return {"mode": "narration"}
+    if scene.mode != "dialogue" or not scene.lines:
+        return {"mode": "narration", "characters": scene.characters}
+    speakers = list(dict.fromkeys(l.speaker for l in scene.lines))
+    return {
+        "mode": "dialogue",
+        "characters": scene.characters,
+        "lines": [{"speaker": l.speaker, "text": l.text, "delivery": l.delivery} for l in scene.lines],
+        "cast_voices": {spk: voices.get(spk, "") for spk in speakers},
+    }
+
+
+def _record_cost(task: dict) -> None:
+    cost = task.get("cost_usd")
+    if cost:
+        usage.record_spend(
+            category="video",
+            model=task.get("model") or task.get("renderer") or "engine",
+            cost_usd=float(cost),
+            units={"seconds": float(task.get("source_seconds") or 0)},
+        )

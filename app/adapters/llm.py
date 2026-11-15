@@ -21,6 +21,7 @@ from tenacity import (
 )
 
 from app.adapters.errors import PermanentProviderError, TransientProviderError
+from app.adapters.rate_limit import get_text_limiter
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.observability import usage
@@ -47,6 +48,8 @@ _RETRY_AFTER_RE = re.compile(
 
 def parse_retry_after(exc: Exception) -> float | None:
     """Pull the provider's suggested back-off (seconds) out of a 429, or None."""
+    if "spend-based rate limit" in str(exc).lower():
+        return 60.0  # rolling 10-min spend window: back off for a full minute
     m = _RETRY_AFTER_RE.search(str(exc))
     if not m:
         return None
@@ -77,6 +80,33 @@ def wait_retry_after(fallback: Callable[[object], float], *, cap: float) -> Call
     return _wait
 
 
+# LLM roles. Each routes to its own model/thinking/temperature via Settings.role_*.
+ROLES = ("script", "judge", "designer", "publish")
+
+
+def build_text_config(
+    *,
+    response_model: type[BaseModel] | None,
+    thinking: str = "",
+    temperature: float | None = None,
+    system: str | None = None,
+) -> dict:
+    """The generate_content config for a structured text call. Pure (unit-tested):
+    thinking / temperature / system are sent ONLY when set, so a model default is
+    never overridden by accident."""
+    config: dict = {}
+    if response_model is not None:
+        config["response_mime_type"] = "application/json"
+        config["response_schema"] = response_model
+    if thinking:
+        config["thinking_config"] = {"thinking_level": thinking}
+    if temperature is not None:
+        config["temperature"] = temperature
+    if system:
+        config["system_instruction"] = system
+    return config
+
+
 class LLMAdapter:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -86,8 +116,14 @@ class LLMAdapter:
     def client(self):
         if self._client is None:
             from google import genai  # imported lazily so mock mode needs no key
+            from google.genai import types
 
-            self._client = genai.Client(api_key=self.settings.gemini_api_key)
+            self._client = genai.Client(
+                api_key=self.settings.gemini_api_key,
+                http_options=types.HttpOptions(
+                    timeout=int(self.settings.llm_timeout_seconds * 1000)
+                ),
+            )
         return self._client
 
     def complete_json(
@@ -97,30 +133,37 @@ class LLMAdapter:
         user: str,
         response_model: type[T],
         mock_factory: Callable[[str], T],
+        role: str = "script",
     ) -> T:
         if self.settings.mock_mode:
             log.info("LLMAdapter mock_mode -> %s", response_model.__name__)
             if self.settings.mock_token_usage:
                 usage.record(total=self.settings.mock_token_usage)
             return mock_factory(user)
-        return self._complete_json_real(system, user, response_model)
+        return self._complete_json_real(system, user, response_model, role)
 
     @retry(
         retry=retry_if_exception_type(TransientProviderError),
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(4),
         # Honor a 429's own retryDelay (capped) when present, else exponential.
-        wait=wait_retry_after(wait_exponential(multiplier=1, min=2, max=20), cap=20.0),
+        wait=wait_retry_after(wait_exponential(multiplier=1, min=2, max=20), cap=60.0),
         reraise=True,
     )
-    def _complete_json_real(self, system: str, user: str, response_model: type[T]) -> T:
+    def _complete_json_real(
+        self, system: str, user: str, response_model: type[T], role: str = "script"
+    ) -> T:
+        model = self.settings.role_model(role)
+        get_text_limiter(self.settings.text_rpm_limit).acquire()
         try:
             resp = self.client.models.generate_content(
-                model=self.settings.gemini_text_model,
-                contents=f"{system}\n\n{user}",
-                config={
-                    "response_mime_type": "application/json",
-                    "response_schema": response_model,
-                },
+                model=model,
+                contents=user,
+                config=build_text_config(
+                    response_model=response_model,
+                    thinking=self.settings.role_thinking(role),
+                    temperature=self.settings.role_temperature(role),
+                    system=system,
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - normalize provider errors
             if _is_transient(exc):
@@ -129,7 +172,7 @@ class LLMAdapter:
                 ) from exc
             raise PermanentProviderError(str(exc)) from exc
 
-        usage.record_usage(getattr(resp, "usage_metadata", None))
+        usage.record_gemini_call("text", model, getattr(resp, "usage_metadata", None))
         try:
             return response_model.model_validate_json(resp.text)
         except ValidationError as exc:

@@ -28,46 +28,26 @@ from app.adapters.errors import ProviderError
 from app.agents.judge import NarrativeJudge
 from app.core.logging import get_logger
 from app.graph.state import Deps, StoryboardState
+from app.prompts import render
 from app.schemas import JudgeReport, Script
 
 log = get_logger(__name__)
-
-_REVISER_SYSTEM = (
-    "<role>\n"
-    "You are a master script doctor. You are given a STORYBOARD SCRIPT that an editor "
-    "scored as not-yet-coherent, plus the editor's notes. Rewrite the script so it tells "
-    "ONE clear story with a real beginning, middle, and end, fixing the SPECIFIC "
-    "weaknesses called out — concentrate your effort on the named weak beats and the "
-    "weakest dimension.\n"
-    "</role>\n\n"
-    "<hard_constraints>\n"
-    "  - Keep EXACTLY the same number of scenes and the same 'order' values.\n"
-    "  - Keep the same overall premise and subject — improve it, don't replace it.\n"
-    "  - Strengthen causality: each beat must follow from the one before.\n"
-    "  - Write a coherent 'arc' and set each scene's 'beat_role' "
-    "(setup/inciting/rising/climax/resolution).\n"
-    "  - 'description' stays concrete and filmable; 'narration' is one short caption.\n"
-    "</hard_constraints>\n\n"
-    "Return STRICT JSON matching the Script schema."
-)
-
 
 def _revise(deps: Deps, script: Script, report: JudgeReport) -> Script:
     """One revision pass: rewrite the script to address the judge's guidance.
 
     Mock mode returns the script unchanged (deterministic offline loop)."""
     return deps.llm.complete_json(
-        system=_REVISER_SYSTEM,
-        user=(
-            "<editor_notes>\n"
-            f"Apply these fixes: {report.revision_guidance or report.rationale}\n"
-            f"Weakest dimension: {report.weakest_dimension}; weak beats: {report.weak_beats}\n"
-            "</editor_notes>\n\n"
-            "<current_script_json>\n"
-            f"{script.model_dump_json(indent=2)}\n"
-            "</current_script_json>"
+        system=render("reflection/reviser_system") + "\n\n" + render("reflection/reviser_style_rules"),
+        user=render(
+            "reflection/reviser_user",
+            guidance=report.revision_guidance or report.rationale,
+            weakest=report.weakest_dimension,
+            weak_beats=report.weak_beats,
+            script_json=script.model_dump_json(indent=2),
         ),
         response_model=Script,
+        role="script",
         mock_factory=lambda _u: script,
     )
 
