@@ -13,7 +13,7 @@ from app.adapters.errors import ProviderError
 from app.adapters.tts import silent_wav, wav_duration_seconds
 from app.agents.script_writer import WORDS_PER_SECOND
 from app.core.logging import get_logger
-from app.graph.state import Deps, SceneAudioMeta, StoryboardState
+from app.graph.state import SCENE_MAX_SECONDS, Deps, SceneAudioMeta, StoryboardState
 from app.schemas import Scene, Script
 
 log = get_logger(__name__)
@@ -27,10 +27,14 @@ def estimate_speech_seconds(text: str, language: str = "en") -> float:
 
 
 def dialogue_hold(scene: Scene, language: str = "en") -> float:
-    return max(3.0, estimate_speech_seconds(scene.spoken_text(), language) + DIALOGUE_PAD_SECONDS)
+    """The scene's planned length, stretched if its lines need longer (one clip caps at 15s)."""
+    speech = estimate_speech_seconds(scene.spoken_text(), language) + DIALOGUE_PAD_SECONDS
+    return min(SCENE_MAX_SECONDS, max(3.0, scene.seconds, speech))
 
 
-async def voice_lines(items: list[tuple[int, str]], deps: Deps) -> tuple[list[SceneAudioMeta], list[str]]:
+async def voice_lines(
+    items: list[tuple[int, str]], deps: Deps, min_holds: dict[int, float] | None = None,
+) -> tuple[list[SceneAudioMeta], list[str]]:
     """Voice (order, text) narration lines with the brand voice (idempotent per order)."""
     store, settings = deps.store, deps.settings
     floor, pad = settings.narration_floor_seconds, settings.narration_pad_seconds
@@ -50,7 +54,7 @@ async def voice_lines(items: list[tuple[int, str]], deps: Deps) -> tuple[list[Sc
             store.save_bytes(name, wav)
         out.append(SceneAudioMeta(
             order=order, voice="narrator", path=store.abspath(name),
-            hold=max(floor, wav_duration_seconds(wav) + pad), caption=text,
+            hold=max(floor, wav_duration_seconds(wav) + pad, (min_holds or {}).get(order, 0.0)), caption=text,
         ))
     return out, warnings
 
@@ -72,8 +76,9 @@ async def narration(state: StoryboardState, deps: Deps) -> StoryboardState:
             to_voice.append((sc.order, sc.narration))
         else:
             out[sc.order] = SceneAudioMeta(order=sc.order, voice="silent", path=None,
-                                           hold=uniform, caption=sc.narration)
-    voiced, warnings = await voice_lines(to_voice, deps) if to_voice else ([], [])
+                                           hold=sc.seconds or uniform, caption=sc.narration)
+    planned = {sc.order: min(SCENE_MAX_SECONDS, sc.seconds) for sc in script.scenes if sc.seconds}
+    voiced, warnings = await voice_lines(to_voice, deps, planned) if to_voice else ([], [])
     for meta in voiced:
         out[meta["order"]] = meta
 

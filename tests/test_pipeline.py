@@ -38,10 +38,10 @@ async def test_full_pipeline_completes(stub_video):
         done = await repo.get_job(s, job.id)
 
     assert done.status == JobStatus.COMPLETED.value
-    # duration 30 @ 2s/frame -> 15 frames, plus one each of the designer + output
+    # 30s narrated -> 4 scenes (one frame each), plus one each of the designer + output
     # artifacts. Assert by kind/count, not a brittle exact-list.
     counts = Counter(a.kind for a in done.artifacts)
-    assert counts["frame"] == 15
+    assert counts["frame"] == 4
     assert counts["script"] == 1
     assert counts["shotlist"] == 1
     assert counts["style_bible"] == 1
@@ -98,14 +98,14 @@ async def test_pipeline_records_stages_and_logs(stub_video):
     async with get_sessionmaker()() as s:
         stages = await repo.get_stages(s, job.id)
     assert [st.name for st in stages] == [
-        "script_writer", "reflection", "designer", "image_gen", "narration",
-        "captions", "music", "assembler", "publish_kit",
+        "brief", "script_writer", "dialogue_pass", "reflection", "designer", "image_gen", "narration",
+        "captions", "music", "assembler", "film_review", "publish_kit",
     ]
     # Narrated + TTS/music pinned off in tests -> those stages report skipped.
-    skipped = {"narration", "captions", "music"}
+    skipped = {"narration", "captions", "music", "film_review"}
     assert all(st.status == ("skipped" if st.name in skipped else "succeeded") for st in stages)
     img = next(st for st in stages if st.name == "image_gen")
-    assert img.progress_current == img.progress_total == 15  # 30s @ 2s/frame
+    assert img.progress_current == img.progress_total == 4  # 30s narrated -> 4 scenes
 
     # Logs are BEST-EFFORT via the queue: lifespan (the drainer) doesn't run under
     # ASGITransport, so DRAIN explicitly before asserting — never race the drainer.

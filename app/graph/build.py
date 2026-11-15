@@ -1,6 +1,6 @@
 """Build the storyboard StateGraph (linear; stage order from pipeline_stage_names).
 
-    script_writer -> reflection -> designer -> image_gen -> narration -> [motion]
+    brief -> script_writer -> dialogue_pass -> reflection -> designer -> image_gen -> narration -> [motion]
       -> captions -> music -> assembler -> publish_kit
 
 Each node is wrapped by ``_instrument`` (stage status + log attribution) when a
@@ -14,6 +14,9 @@ import functools
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.assembler import assembler
+from app.agents.brief import brief
+from app.agents.dialogue_pass import dialogue_pass
+from app.agents.film_review import film_review
 from app.agents.captions import captions
 from app.agents.designer import designer
 from app.agents.image_gen import image_gen
@@ -38,17 +41,19 @@ def uses_video_stage(settings: Settings) -> bool:
 def pipeline_stage_names(settings: Settings) -> list[str]:
     """Ordered stage names — shared by the graph and the API. ``motion`` exists only
     when the motion engine is enabled."""
-    names = ["script_writer", "reflection", "designer", "image_gen", "narration"]
+    names = ["brief", "script_writer", "dialogue_pass", "reflection", "designer", "image_gen", "narration"]
     if uses_video_stage(settings):
         names.append("motion")
-    names += ["captions", "music", "assembler", "publish_kit"]
+    names += ["captions", "music", "assembler", "film_review", "publish_kit"]
     return names
 
 
 # Resolved at call time so tests that monkeypatch app.graph.build.<node> win.
 def _node_for(name: str):
     return {
+        "brief": brief,
         "script_writer": script_writer,
+        "dialogue_pass": dialogue_pass,
         "reflection": reflection,
         "designer": designer,
         "image_gen": image_gen,
@@ -57,6 +62,7 @@ def _node_for(name: str):
         "captions": captions,
         "music": music,
         "assembler": assembler,
+        "film_review": film_review,
         "publish_kit": publish_kit,
     }[name]
 

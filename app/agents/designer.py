@@ -30,6 +30,7 @@ def _shots_from_script(script: Script) -> list[Shot]:
         Shot(
             order=s.order,
             image_prompt=f"{script.style}. {s.description}".strip(". "),
+            location=s.location,
             narration=s.narration,
             characters=list(s.characters),
         )
@@ -106,6 +107,37 @@ async def _build_cast(
     return cast_paths, warnings
 
 
+def plate_name(tag: str) -> str:
+    return f"loc_{_slug(tag)}.png"
+
+
+async def _build_locations(shotlist: Shotlist, style_ref: bytes | None, deps: Deps) -> tuple[dict[str, str], list[str]]:
+    """One empty-set reference plate per location tag (load-or-produce)."""
+    store, warnings = deps.store, []
+    used = {sh.location.strip().upper() for sh in shotlist.shots if sh.location.strip()}
+    specs = {loc.tag.strip().upper(): loc for loc in shotlist.locations if loc.tag.strip().upper() in used}
+    sem = asyncio.Semaphore(max(1, deps.settings.image_max_concurrency))
+
+    async def one(tag: str, look: str) -> tuple[str, str | None]:
+        name = plate_name(tag)
+        if store.exists(name):
+            return tag, store.abspath(name)
+        prompt = render("designer/location_plate", tag=tag, look=look, style_bible=shotlist.style_bible[:1500])
+        try:
+            async with sem:
+                img = await asyncio.to_thread(deps.image.generate_image, prompt, refs=[b for b in (style_ref,) if b])
+        except ProviderError as exc:
+            warnings.append(f"designer: location plate {tag} failed ({exc}); text-only set for that place")
+            return tag, None
+        return tag, store.save_bytes(name, img)
+
+    results = await asyncio.gather(*(one(t, specs[t].look if t in specs else t) for t in sorted(used)))
+    paths = {t: p for t, p in results if p}
+    if paths:
+        log.info("locations ready: %s", ", ".join(paths))
+    return paths, warnings
+
+
 async def designer(state: StoryboardState, deps: Deps) -> StoryboardState:
     store = deps.store
     warnings: list[str] = []
@@ -160,14 +192,17 @@ async def designer(state: StoryboardState, deps: Deps) -> StoryboardState:
             style_ref_path = None
 
     style_ref = store.load_bytes(style_ref_path) if style_ref_path else None
-    cast_paths, cast_warnings = await _build_cast(script, shotlist, style_ref, deps)
+    (cast_paths, cast_warnings), (location_paths, loc_warnings) = await asyncio.gather(
+        _build_cast(script, shotlist, style_ref, deps), _build_locations(shotlist, style_ref, deps)
+    )
 
     return {
         "shotlist_path": shotlist_path,
         "style_bible_path": style_bible_path,
         "style_ref_path": style_ref_path,
         "cast_paths": cast_paths,
-        "warnings": warnings + cast_warnings,
+        "location_paths": location_paths,
+        "warnings": warnings + cast_warnings + loc_warnings,
     }
 
 
@@ -179,4 +214,5 @@ def _sync_shots(shotlist: Shotlist, script: Script) -> None:
         if scene is None:
             continue
         shot.narration = scene.narration
+        shot.location = scene.location or shot.location
         shot.characters = [c.upper() for c in (shot.characters or scene.characters)]

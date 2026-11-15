@@ -198,6 +198,7 @@ class RunLedger(Base):
     omni_scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     fallback_scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     judge_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    film_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     runtime_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     models: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)

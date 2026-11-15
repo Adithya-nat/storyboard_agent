@@ -1,3 +1,8 @@
-<!-- script_writer user turn. Vars: idea, duration, n, seconds, style, language. -->
+<!-- script_writer user turn. Vars: idea, brief_json, duration, n, style, language. -->
 <idea>{{ idea }}</idea>
-Target length: {{ duration }}s, {{ n }} scenes (~{{ seconds }}s each). Style: {{ style }}. Language: {{ language }}. The tagged idea is the creative brief to dramatize.
+
+<creative_brief>
+{{ brief_json }}
+</creative_brief>
+
+Runtime: {{ duration }}s in {{ n }} scenes. Style: {{ style }}. Language: {{ language }}. Write the screenplay that delivers this brief.

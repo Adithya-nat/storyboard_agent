@@ -27,8 +27,8 @@ from app.agents.judge import NarrativeJudge
 from app.artifacts.store import ArtifactStore
 from app.core.config import Settings, get_settings
 from app.graph.build import build_graph
-from app.graph.state import Deps, frames_for_duration
-from app.schemas import JudgeReport, Script, Shotlist
+from app.graph.state import Deps, scenes_for_duration
+from app.schemas import CreativeBrief, JudgeReport, Script, Shotlist
 from evals.golden_prompts import GOLDEN_PROMPTS
 
 _MAX_CAPTION_CHARS = 120  # a 2s on-screen caption should be short enough to read
@@ -42,7 +42,8 @@ Check = tuple[str, bool, str]  # (name, ok, detail)
 
 
 def _checks(store: ArtifactStore, duration: int, settings: Settings, video_path: str | None) -> list[Check]:
-    expected = frames_for_duration(duration, settings.seconds_per_frame)
+    expected = (len(CreativeBrief.model_validate(store.load_json(store.abspath("brief.json"))).scenes)
+                if store.exists("brief.json") else scenes_for_duration(duration, settings.default_style))
     out: list[Check] = []
 
     def add(name: str, fn) -> None:
@@ -105,7 +106,9 @@ def _quality(store: ArtifactStore, deps: Deps) -> tuple[JudgeReport | None, str 
             if store.exists("shotlist.json")
             else None
         )
-        return NarrativeJudge(deps.llm, deps.settings).score(script, shotlist), None
+        brief = (CreativeBrief.model_validate(store.load_json(store.abspath("brief.json")))
+                 if store.exists("brief.json") else None)
+        return NarrativeJudge(deps.llm, deps.settings).score(script, shotlist, brief), None
     except Exception as exc:  # noqa: BLE001
         return None, f"{type(exc).__name__}: {exc}"
 

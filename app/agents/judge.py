@@ -1,40 +1,34 @@
-"""Narrative judge: score a Script on story cohesion BEFORE any media is generated.
+"""Narrative judge: scores a screenplay (vs its creative brief) before any media is made.
 
-Reused by TWO callers:
-  - the eval harness (``evals/run.py``) — MEASURE how good the prompts are.
-  - the reflection node (``app/agents/reflection.py``) — the runtime guard that
-    critiques->revises a weak script until it clears a threshold.
-
-Design choices that keep the score meaningful:
-  - Five 0-100 dimensions, weighted toward the user's actual complaint (structure +
-    continuity). The canonical ``overall`` is computed HERE as a weighted mean, never
-    read from the model — so a threshold means the same thing in eval and reflection,
-    and the model can't fudge its own arithmetic.
-  - Temperature 0 (deterministic-as-possible scoring) when the adapter forwards it.
-  - A deterministic ``mock_factory`` so the whole thing runs offline with no API key.
+Shared by the eval harness and the reflection node. ``overall`` is a weighted mean computed
+here, never read from the model, so a threshold means the same thing everywhere.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 from app.adapters.llm import LLMAdapter
 from app.core.config import Settings, get_settings
 from app.prompts import render
-from app.schemas import JudgeReport, Script, Shotlist
+from app.schemas import CreativeBrief, JudgeReport, Script, Shotlist
 
-# Weights sum to 1.0. Structure + continuity dominate: they ARE the "no start/mid/end"
-# complaint. visual_concreteness matters least for STORY cohesion (the designer + image
-# model carry the look).
+# Weights sum to 1.0. Structure + continuity + hook carry the "random clips" complaint;
+# visual_concreteness matters least for story cohesion.
 DIMENSION_WEIGHTS: dict[str, float] = {
-    "structure": 0.30,
-    "continuity": 0.25,
-    "clarity": 0.20,
-    "payoff": 0.15,
-    "visual_concreteness": 0.10,
+    "structure": 0.20,
+    "continuity": 0.20,
+    "clarity": 0.15,
+    "hook": 0.13,
+    "brief_adherence": 0.12,
+    "payoff": 0.12,
+    "visual_concreteness": 0.08,
 }
-
-DIALOGUE_WEIGHT = 0.12  # only when the script has dialogue; the other weights scale down
+# Mixed in only when they apply; the base weights scale down by their total.
+DIALOGUE_WEIGHTS: dict[str, float] = {"dialogue": 0.10, "dialogue_thread": 0.10}
+REGISTER_WEIGHT = 0.08  # whenever anything is spoken
+DIALOGUE_WEIGHT = sum(DIALOGUE_WEIGHTS.values())
 
 
 def _system(has_dialogue: bool) -> str:
@@ -42,16 +36,25 @@ def _system(has_dialogue: bool) -> str:
     return base + "\n\n" + render("judge/dialogue_dimension") if has_dialogue else base
 
 
-def compute_overall(report: JudgeReport, has_dialogue: bool = False) -> int:
+def compute_overall(report: JudgeReport, has_dialogue: bool = False, has_speech: bool | None = None) -> int:
     """Canonical weighted mean (0-100); never trust the model's arithmetic."""
+    extra = dict(DIALOGUE_WEIGHTS) if has_dialogue else {}
+    if has_speech if has_speech is not None else has_dialogue:
+        extra["register_fit"] = REGISTER_WEIGHT
     base = sum(getattr(report, dim) * w for dim, w in DIMENSION_WEIGHTS.items())
-    if not has_dialogue:
-        return round(base)
-    return round(base * (1 - DIALOGUE_WEIGHT) + report.dialogue * DIALOGUE_WEIGHT)
+    mixed = sum(getattr(report, dim) * w for dim, w in extra.items())
+    return round(base * (1 - sum(extra.values())) + mixed)
 
 
-def _format_target(script: Script, shotlist: Shotlist | None) -> str:
-    parts = ["<script_json>", script.model_dump_json(indent=2), "</script_json>"]
+def _format_target(script: Script, shotlist: Shotlist | None, brief: CreativeBrief | None = None) -> str:
+    parts = []
+    if brief is not None:
+        parts += ["<creative_brief>", brief.model_dump_json(indent=2), "</creative_brief>"]
+    data = script.model_dump()
+    for sc in data["scenes"]:
+        if any(sh["lines"] for sh in sc["shots"]):
+            sc.pop("lines")  # the shots already carry them
+    parts += ["<script_json>", json.dumps(data, indent=2, ensure_ascii=False), "</script_json>"]
     if shotlist is not None:
         parts += ["<shotlist_json>", shotlist.model_dump_json(indent=2), "</shotlist_json>"]
     return "\n".join(parts)
@@ -62,13 +65,10 @@ def _mock_factory(score: int) -> Callable[[str], JudgeReport]:
     reproducible and the reflection loop's branches are testable end-to-end."""
 
     def factory(_user: str) -> JudgeReport:
+        dims = {d: score for d in (*DIMENSION_WEIGHTS, *DIALOGUE_WEIGHTS, "register_fit")}
         return JudgeReport(
-            structure=score,
-            continuity=score,
-            clarity=score,
-            visual_concreteness=score,
-            payoff=score,
-            dialogue=score,
+            **dims,
+            retelling="(mock) the story as written.",
             weakest_dimension="structure",
             revision_guidance="(mock) tighten the causal links between beats.",
             rationale="(mock judge)",
@@ -84,14 +84,15 @@ class NarrativeJudge:
         self.settings = settings or get_settings()
         self.llm = llm or LLMAdapter(self.settings)
 
-    def score(self, script: Script, shotlist: Shotlist | None = None) -> JudgeReport:
+    def score(self, script: Script, shotlist: Shotlist | None = None, brief: CreativeBrief | None = None) -> JudgeReport:
         has_dialogue = any(sc.mode == "dialogue" and sc.lines for sc in script.scenes)
+        has_speech = has_dialogue or any(sc.narration.strip() for sc in script.scenes)
         report = self.llm.complete_json(
             system=_system(has_dialogue),
-            user=_format_target(script, shotlist),
+            user=_format_target(script, shotlist, brief),
             response_model=JudgeReport,
             mock_factory=_mock_factory(self.settings.mock_quality_score),
             role="judge",
         )
-        report.overall = compute_overall(report, has_dialogue)
+        report.overall = compute_overall(report, has_dialogue, has_speech)
         return report

@@ -44,10 +44,9 @@ class _ScriptedLLM:
             if self.raise_judge_on == self.judge_calls:
                 raise PermanentProviderError("judge down")
             score = self.judge_scores[min(self.judge_calls - 1, len(self.judge_scores) - 1)]
-            return JudgeReport(
-                structure=score, continuity=score, clarity=score,
-                visual_concreteness=score, payoff=score, revision_guidance="g",
-            )
+            dims = ("structure", "continuity", "clarity", "visual_concreteness", "payoff", "hook",
+                    "brief_adherence", "dialogue", "dialogue_thread", "register_fit")
+            return JudgeReport(**{d: score for d in dims}, revision_guidance="g")
         if response_model is Script:
             self.revise_calls += 1
             if self.raise_revise_on == self.revise_calls:

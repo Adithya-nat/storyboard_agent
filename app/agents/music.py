@@ -31,14 +31,18 @@ async def music(state: StoryboardState, deps: Deps) -> StoryboardState:
 
     script = Script.model_validate(store.load_json(state["script_path"]))
     seconds = round(total_runtime(state))
+    holds = [a.get("hold") or 0 for a in sorted(state.get("scene_audio") or [], key=lambda a: a["order"])]
+    starts = [sum(holds[:i]) for i in range(len(holds))] if all(holds) and len(holds) == len(script.scenes) else []
     climax = next((i for i, sc in enumerate(script.scenes) if sc.beat_role == "climax"), len(script.scenes) - 2)
+    climax_at = (starts[climax] + holds[climax] / 2) if starts else seconds * (climax + 0.5) / max(1, len(script.scenes))
     prompt = render(
         "music/score",
         seconds=seconds,
         logline=script.logline,
         arc=script.arc,
         look=script.style,
-        climax_at=round(seconds * (climax + 0.5) / max(1, len(script.scenes))),
+        climax_at=round(climax_at),
+        cues=", ".join(f"{t:.0f}s" for t in starts[1:]) or "evenly through the film",
     )
     try:
         data, ext, model = await asyncio.to_thread(deps.music.compose, prompt)

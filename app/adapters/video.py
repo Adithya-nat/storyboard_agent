@@ -148,7 +148,7 @@ async def assemble_kenburns(
     clips: list[tuple[str, str, float]],
     output_path: str,
     *,
-    crossfade: float = 0.4,
+    crossfade: float | list[float] = 0.4,
     fps: int = 30,
     motion_paths: list[str | None] | None = None,
 ) -> str:
@@ -360,21 +360,22 @@ async def build_narration_track(segments: list[tuple[str, float]], output_path: 
     return str(output_path)
 
 
-def xfade_offsets(holds: list[float], d: float) -> list[float]:
-    """Start offset of each clip in the chained-xfade timeline.
+def _overlaps(n: int, d: float | list[float]) -> list[float]:
+    """Per-boundary overlap (index j = into clip j); 0 = hard cut."""
+    return [0.0] + (list(d) if isinstance(d, list) else [d] * max(0, n - 1))
 
-    Running length after k clips = sum(holds[:k]) - (k-1)*d, so the k-th transition
-    starts at offset = running_len_before_k - d. This is the SINGLE SOURCE OF TRUTH used
-    by BOTH the video xfade filter (below) and the per-beat narration placement (the
-    assembler's synced voiceover), so audio can never drift from the visuals.
-    """
+
+def xfade_offsets(holds: list[float], d: float | list[float]) -> list[float]:
+    """Start offset of each clip on the timeline. ``d`` is one crossfade for every cut, or a
+    per-cut list (0 = hard cut). The single source of truth for video AND audio placement."""
     if not holds:
         return []
+    ov = _overlaps(len(holds), d)
     offsets = [0.0]
     running = holds[0]
     for j in range(1, len(holds)):
-        offsets.append(max(0.0, running - d))
-        running = running + holds[j] - d
+        offsets.append(max(0.0, running - ov[j]))
+        running = running + holds[j] - ov[j]
     return offsets
 
 
@@ -389,17 +390,19 @@ def concat_offsets(holds: list[float]) -> list[float]:
     return offsets
 
 
-def _xfade_filter(n: int, holds: list[float], d: float) -> tuple[str, str]:
-    """Build a chained-xfade filter_complex + the final output label, using
-    ``xfade_offsets`` so the video offsets match the audio placement exactly."""
-    offsets = xfade_offsets(holds, d)
+def _xfade_filter(n: int, holds: list[float], d: float | list[float]) -> tuple[str, str]:
+    """Chained filter_complex: hard cuts concat, dissolves xfade, at ``xfade_offsets``."""
+    offsets, ov = xfade_offsets(holds, d), _overlaps(n, d)
     parts: list[str] = []
     prev = "0:v"
     for j in range(1, n):
         out_label = f"x{j}"
-        parts.append(
-            f"[{prev}][{j}:v]xfade=transition=fade:duration={d:.3f}:offset={offsets[j]:.3f}[{out_label}]"
-        )
+        if ov[j] > 0:
+            parts.append(
+                f"[{prev}][{j}:v]xfade=transition=fade:duration={ov[j]:.3f}:offset={offsets[j]:.3f}[{out_label}]"
+            )
+        else:
+            parts.append(f"[{prev}][{j}:v]concat=n=2:v=1:a=0[{out_label}]")
         prev = out_label
     return ";".join(parts), prev
 
@@ -421,8 +424,8 @@ def _db(gain_db: float) -> str:
 
 async def build_mix(
     *,
-    speech: list[tuple[str, float]],
-    ambience: list[tuple[str, float]],
+    speech: list[tuple],
+    ambience: list[tuple],
     music: str | None,
     total_seconds: float,
     output_path: str,
@@ -443,14 +446,18 @@ async def build_mix(
         inputs.extend(["-i", str(path)])
         return len(inputs) // 2 - 1
 
-    def bus(items: list[tuple[str, float]], label: str, gain: str = "1") -> str | None:
+    def bus(items: list[tuple], label: str, gain: str = "1") -> str | None:
         if not items:
             return None
         parts = []
-        for path, offset in items:
+        for path, offset, *rest in items:
             i = add(path)
             ms = max(0, int(round(offset * 1000)))
-            filters.append(f"[{i}:a]aresample=48000,aformat=channel_layouts=mono,volume={gain},adelay={ms}:all=1[{label}{i}]")
+            dur = rest[0] if rest and rest[0] else None
+            # Clip audio is cut to its scene with 60ms fades, so cuts never click or bleed.
+            edge = (f"atrim=0:{dur:.3f},afade=t=in:d=0.06,afade=t=out:st={max(0.0, dur - 0.06):.3f}:d=0.06,"
+                    if dur else "")
+            filters.append(f"[{i}:a]aresample=48000,aformat=channel_layouts=mono,{edge}volume={gain},adelay={ms}:all=1[{label}{i}]")
             parts.append(f"[{label}{i}]")
         filters.append(f"{''.join(parts)}amix=inputs={len(parts)}:normalize=0[{label}]")
         return label

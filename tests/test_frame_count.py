@@ -34,7 +34,7 @@ def _deps(artifact_root, job_id, max_frames=None) -> Deps:
     )
 
 
-@pytest.mark.parametrize("duration,expected", [(30, 15), (60, 30)])
+@pytest.mark.parametrize("duration,expected", [(30, 4), (60, 8)])
 async def test_script_writer_scales_with_duration(artifact_root, duration, expected):
     deps = _deps(artifact_root, f"fc-{duration}")  # max_frames=None -> derived
     out = await script_writer({"prompt": "a city at dawn", "duration": duration}, deps)

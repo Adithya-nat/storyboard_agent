@@ -48,13 +48,14 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
     total = len(shots)
 
     ref_image, sheets = load_refs(store, state)
+    plates = load_plates(store, state)
     cast_looks = _cast_looks(store, state)
 
     def refs_for(shot) -> list:
-        return frame_refs(ref_image, sheets, shot.characters)
+        return frame_refs(ref_image, sheets, shot.characters, plates.get(shot.location.strip().upper()))
 
     def prompt_for(shot) -> str:
-        return frame_prompt(shot.image_prompt, shot.characters, sheets, cast_looks)
+        return frame_prompt(shot.image_prompt, shot.characters, sheets, cast_looks, shot.location.strip().upper() in plates)
 
     sem = asyncio.Semaphore(max(1, deps.settings.image_max_concurrency))
 
@@ -179,6 +180,10 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
     return {"frames": frames, "warnings": warnings}
 
 
+def load_plates(store, state) -> dict[str, bytes]:
+    return {t.upper(): store.load_bytes(p) for t, p in (state.get("location_paths") or {}).items() if os.path.exists(p)}
+
+
 def load_refs(store, state) -> tuple[bytes | None, dict[str, list[bytes]]]:
     """Style ref + each character's reference sheets (missing => text-only for that part)."""
     style_ref_path = state.get("style_ref_path")
@@ -190,27 +195,33 @@ def load_refs(store, state) -> tuple[bytes | None, dict[str, list[bytes]]]:
     return ref_image, sheets
 
 
-def frame_refs(ref_image: bytes | None, sheets: dict, characters) -> list:
+def frame_refs(ref_image: bytes | None, sheets: dict, characters, plate: bytes | None = None) -> list:
     out: list = [("Style reference:", ref_image)] if ref_image else []
+    if plate:
+        out.append(("Location reference (the exact set: layout, props, light):", plate))
     for name in characters:
         for k, img in enumerate(sheets.get(name.upper(), [])):
             out.append((f"{name.upper()} — character reference {k + 1}:", img))
     return out[:14]
 
 
-def frame_prompt(image_prompt: str, characters, sheets: dict, looks: dict) -> str:
+def frame_prompt(image_prompt: str, characters, sheets: dict, looks: dict, plate: bool = False) -> str:
     names = [n.upper() for n in characters if sheets.get(n.upper())]
+    if plate:
+        image_prompt += "\n\nThe set must match the labelled location reference exactly (layout, props, light)."
     if not names:
         return image_prompt
     cast = "\n".join(f"- {n}: {looks.get(n, '')}" for n in names)
     return image_prompt + "\n\n" + render("image_gen/cast_rules", cast=cast)
 
 
-def render_frame(deps: Deps, state, image_prompt: str, characters) -> bytes:
+def render_frame(deps: Deps, state, image_prompt: str, characters, location: str = "") -> bytes:
     """One cast-conditioned frame (with the identity check + one re-render). Blocking."""
     ref_image, sheets = load_refs(deps.store, state)
+    plate = load_plates(deps.store, state).get(location.strip().upper())
     looks = _cast_looks(deps.store, state)
-    prompt, refs = frame_prompt(image_prompt, characters, sheets, looks), frame_refs(ref_image, sheets, characters)
+    prompt = frame_prompt(image_prompt, characters, sheets, looks, plate is not None)
+    refs = frame_refs(ref_image, sheets, characters, plate)
     raw = deps.image.generate_image(prompt, refs=refs, seed=deps.settings.image_seed)
     if _identity_mismatch(deps, raw, characters, sheets, looks):
         raw = deps.image.generate_image(prompt, refs=refs, seed=deps.settings.image_seed)

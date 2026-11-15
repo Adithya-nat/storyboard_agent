@@ -40,7 +40,8 @@ def _video(i="int-1"):
 
 
 def _adapter(tmp_path, items, **kw):
-    s = Settings(gemini_api_key="k", use_mock_providers=False, omni_rpm_limit=100000, omni_speaker_check=False, **kw)
+    s = Settings(gemini_api_key="k", use_mock_providers=False, omni_rpm_limit=100000, omni_speaker_check=False,
+                 **{"omni_scene_qc": False, **kw})
     a = OmniVideoAdapter(s, journal_dir=tmp_path / "ops")
     fake = _Fake(items)
     a._client = SimpleNamespace(interactions=fake, models=None, files=None)

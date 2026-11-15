@@ -49,6 +49,9 @@ from app.schemas import (
     CastMember,
     PublishKit,
     SceneLine,
+    SceneShotView,
+    BriefView,
+    FilmReviewView,
 )
 from app.workers.runner import run_job
 
@@ -443,6 +446,16 @@ async def get_storyboard_content(
             return {}
 
     script = _read_json(by_kind.get("script"))
+    job_dir = Path(by_kind["script"].path).parent if by_kind.get("script") else None
+
+    def _job_json(name: str) -> dict:
+        p = job_dir / name if job_dir else None
+        try:
+            return json.loads(p.read_text(encoding="utf-8")) if p and p.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    brief_raw, review_raw = _job_json("brief.json"), _job_json("film_review.json")
     scene_audio = {int(a["order"]): a for a in (_read_json(by_kind.get("scene_audio")) or []) if "order" in a}
     script_scenes = {int(sc["order"]): sc for sc in script.get("scenes", []) if "order" in sc}
     shotlist = _read_json(by_kind.get("shotlist"))
@@ -506,6 +519,12 @@ async def get_storyboard_content(
             narration=audio.get("caption") or narration_by_order.get(order, ""),
             mode=src.get("mode", "narration"),
             lines=[SceneLine(**ln) for ln in src.get("lines", [])],
+            shots=[
+                SceneShotView(size=sh.get("size", "medium"), action=sh.get("action", ""),
+                              lines=[SceneLine(**ln) for ln in sh.get("lines", [])])
+                for sh in src.get("shots", [])
+            ],
+            location=src.get("location", ""),
             transcript=audio.get("transcript", "") or "",
             voice=audio.get("voice") or ("narrator" if "narration" in by_kind else "silent"),
             frame_url=_artifact_url(job_id, f.id),
@@ -553,6 +572,12 @@ async def get_storyboard_content(
         style_ref_url=_artifact_url(job_id, style_ref.id) if style_ref else None,
         total_tokens=job.total_tokens,
         narrated="narration" in by_kind,
+        brief=BriefView(
+            format=brief_raw.get("format", ""), hook=brief_raw.get("hook", ""), logline=brief_raw.get("logline", ""),
+            setting=brief_raw.get("setting", ""), era=(brief_raw.get("speech") or {}).get("era", "modern"),
+            period=(brief_raw.get("speech") or {}).get("period", ""), dialect=(brief_raw.get("speech") or {}).get("dialect", ""),
+        ) if brief_raw else None,
+        film_review=FilmReviewView.model_validate(review_raw) if review_raw else None,
         motion_coverage={
             "total": len(frames),
             "animated": len(motion_by_order),

@@ -188,6 +188,12 @@ async def _finish_ledger(job_id: str, final: dict, collector: UsageCollector, st
 
             with open(final["reflection_path"], encoding="utf-8") as fh:
                 judge = json.load(fh).get("final_overall")
+        film = None
+        if final.get("film_review_path"):
+            import json
+
+            with open(final["film_review_path"], encoding="utf-8") as fh:
+                film = json.load(fh).get("score")
         async with get_sessionmaker()() as session:
             by_cat = await repo.job_spend_by_category(session, job_id)
             events = await repo.spend_events_for_job(session, job_id)
@@ -203,6 +209,7 @@ async def _finish_ledger(job_id: str, final: dict, collector: UsageCollector, st
                 omni_scenes=omni,
                 fallback_scenes=max(0, len(clips) - omni) if clips else 0,
                 judge_score=judge,
+                film_score=film,
                 runtime_seconds=(datetime.now(timezone.utc) - started).total_seconds(),
                 models=sorted({e.model for e in events}),
                 finished_at=datetime.now(timezone.utc),
