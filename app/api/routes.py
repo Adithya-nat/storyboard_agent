@@ -27,6 +27,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.adapters.turnstile import verify_turnstile
+from app.artifacts.rows import assets_version
 from app.core.images import raqm_available
 from app.observability.budget import budget_status, estimate
 from app.core.config import get_settings
@@ -317,6 +318,7 @@ async def stream_events(job_id: str, request: Request) -> EventSourceResponse:
         hdr = request.headers.get("last-event-id")
         cursor = int(hdr) if (hdr and hdr.lstrip("-").isdigit() and int(hdr) >= 0) else 0
         last_sig: tuple | None = None
+        last_assets: str | None = None
         terminal_quiet = 0
 
         while True:
@@ -351,6 +353,14 @@ async def stream_events(job_id: str, request: Request) -> EventSourceResponse:
                     "data": json.dumps([_stage_ref(st).model_dump(mode="json") for st in stages]),
                 }
                 last_sig = sig
+
+            # Live assets: a fingerprint of the artifact set; clients refetch
+            # GET /{id}/live when it changes. Unknown events are ignored by
+            # older clients, so this is purely additive.
+            assets = assets_version(job.artifacts)
+            if assets != last_assets:
+                yield {"event": "assets", "data": json.dumps({"version": assets})}
+                last_assets = assets
 
             for lg in logs:
                 yield {"id": str(lg.id), "event": "log", "data": _log_line(lg).model_dump_json()}

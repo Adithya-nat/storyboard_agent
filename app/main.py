@@ -30,6 +30,7 @@ from app.core.logging import configure_logging, get_logger
 from app.db import repository as repo
 from app.db.session import get_sessionmaker
 from app.api.usage import router as usage_router
+from app.api.live import router as live_router
 from app.core.images import raqm_available
 from app.core.model_check import validate_models
 from app.graph.checkpoint import setup_checkpointer
@@ -143,6 +144,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.include_router(storyboard_router)
 app.include_router(usage_router)
+app.include_router(live_router)
 
 
 @app.get("/health")

@@ -17,6 +17,7 @@ from app.adapters.music import LyriaMusicAdapter
 from app.adapters.omni import OmniVideoAdapter
 from app.adapters.transcribe import TranscribeAdapter
 from app.adapters.tts import GeminiTTSAdapter
+from app.artifacts.rows import artifact_rows
 from app.artifacts.store import ArtifactStore
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -219,42 +220,7 @@ async def _persist(job_id: str, final: dict, collector: UsageCollector | None = 
 
     # Build the full artifact set, then REPLACE (clear-then-insert) so a resumed
     # job re-persisting the same artifacts doesn't duplicate rows.
-    artifacts: list[dict] = []
-    for kind in (
-        "script_path",
-        "reflection_path",
-        "shotlist_path",
-        "style_bible_path",
-        "style_ref_path",
-        "motion_manifest_path",
-    ):
-        if final.get(kind):
-            artifacts.append({"kind": kind.removesuffix("_path"), "path": final[kind]})
-    for f in frames:
-        artifacts.append(
-            {"kind": "frame", "path": f["path"], "status": f["status"], "order_index": f["order"]}
-        )
-    # Per-scene motion clips (motion engine). Served for free by the existing
-    # /artifacts/{id} route; mapped to scenes[].video_url in get_storyboard_content.
-    for c in final.get("motion_clips", []) or []:
-        artifacts.append(
-            {
-                "kind": "motion",
-                "path": c["path"],
-                "status": c.get("status", "ok"),
-                "order_index": c["order"],
-            }
-        )
-    if final.get("video_path"):
-        artifacts.append({"kind": "video", "path": final["video_path"]})
-    if final.get("narration_path"):
-        artifacts.append({"kind": "narration", "path": final["narration_path"]})
-    for kind in ("publish_path", "cover_path", "music_path", "scene_audio_path"):
-        if final.get(kind):
-            artifacts.append({"kind": kind.removesuffix("_path"), "path": final[kind]})
-    for name, paths in (final.get("cast_paths") or {}).items():
-        if paths:
-            artifacts.append({"kind": f"cast:{name[:26]}", "path": paths[0]})
+    artifacts = artifact_rows(final)
 
     async with sessionmaker() as session:
         await repo.replace_artifacts(session, job_id, artifacts)
