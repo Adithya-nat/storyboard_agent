@@ -43,7 +43,8 @@ async def voice_lines(
     warnings: list[str] = []
     for i, (order, text) in enumerate(items):
         name = f"narration_{order:02d}.wav"
-        if store.exists(name):
+        failed = f"narration_{order:02d}.failed"  # silence stood in; resume retries it for real
+        if store.exists(name) and not store.exists(failed):
             wav = store.load_bytes(store.abspath(name))
         else:
             try:
@@ -52,10 +53,12 @@ async def voice_lines(
                 raise paused("narration", i, len(items), "narration lines") from None
             try:
                 wav = await asyncio.to_thread(deps.tts.synthesize, text)
+                store.remove(failed)
             except ProviderError as exc:
                 log.warning("narration for scene %s failed (%s); using silence", order, exc)
                 warnings.append(f"narration: scene {order} voiceover failed ({exc}); silent")
                 wav = silent_wav(floor)
+                store.write_marker(failed)
             store.save_bytes(name, wav)
         out.append(SceneAudioMeta(
             order=order, voice="narrator", path=store.abspath(name),

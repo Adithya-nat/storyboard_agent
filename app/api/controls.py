@@ -91,9 +91,11 @@ async def get_checkpoint(
     root = Path(settings.artifact_root) / job_id
     pipeline = pipeline_stage_names(settings)
     stages = {st.name: st for st in await repo.get_stages(session, job_id)}
-    flying = control.in_flight(job_id)
-    history = await _stage_history(session)
+    history = await _stage_history(session, user.scope)
     bps = list(job.breakpoints or [])
+    # Read in-flight units after the last await, right before the (synchronous) disk scan,
+    # so a unit that finishes meanwhile isn't counted as both done and pending.
+    flying = control.in_flight(job_id)
 
     rows: list[CheckpointStage] = []
     used_history = False
@@ -170,12 +172,13 @@ def _units(root: Path, stage: str, flying: list[int], settings) -> UnitProgress:
                         pending=pending, unit_cost_usd=round(unit, 4))
 
 
-async def _stage_history(session: AsyncSession, runs: int = 20) -> dict[str, float]:
-    """Average spend per stage over the last finished runs (spend events outlive jobs)."""
-    ids = (await session.execute(
-        select(RunLedger.job_id).where(RunLedger.status.like("completed%"))
-        .order_by(RunLedger.started_at.desc()).limit(runs)
-    )).scalars().all()
+async def _stage_history(session: AsyncSession, scope: str | None, runs: int = 20) -> dict[str, float]:
+    """Average spend per stage over the caller's last finished runs (spend events outlive
+    jobs). Hosted mode only ever averages the caller's own runs, never other users'."""
+    query = select(RunLedger.job_id).where(RunLedger.status.like("completed%"))
+    if scope is not None:
+        query = query.where(RunLedger.user_id == scope)
+    ids = (await session.execute(query.order_by(RunLedger.started_at.desc()).limit(runs))).scalars().all()
     if not ids:
         return {}
     events = (await session.execute(

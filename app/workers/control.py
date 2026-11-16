@@ -115,19 +115,29 @@ class RunControl:
                 log.warning("pause flag read failed for job %s", self.job_id, exc_info=True)
             if self._db_flag:
                 signal_pause(self.job_id)
-        return self._db_flag
+        # A pause signalled while the DB read was in flight still counts.
+        return self._db_flag or _event(self.job_id).is_set()
 
     async def gate(self) -> None:
         if await self.requested():
             raise PauseRequested()
 
     async def wait(self, seconds: float) -> bool:
-        """Sleep up to ``seconds``, waking early on a pause request. True if paused."""
-        try:
-            await asyncio.wait_for(_event(self.job_id).wait(), timeout=max(0.0, seconds))
-            return True
-        except asyncio.TimeoutError:
-            return await self.requested()
+        """Sleep up to ``seconds``, waking early on a pause request. True if paused.
+
+        Waits in ``poll_seconds`` slices so a pause recorded by another process (DB only,
+        no local event) still cuts the wait short."""
+        deadline = time.monotonic() + max(0.0, seconds)
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return await self.requested()
+            try:
+                await asyncio.wait_for(_event(self.job_id).wait(), timeout=min(left, self._poll))
+                return True
+            except asyncio.TimeoutError:
+                if await self.requested():
+                    return True
 
     async def take_breakpoint(self, stage: str) -> bool:
         """If ``stage`` is a breakpoint, consume it and raise the pause flag. A consumed

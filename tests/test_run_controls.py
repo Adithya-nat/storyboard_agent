@@ -3,6 +3,7 @@ withdrawing a pause mid-drain, and the checkpoint (per-unit state + cost to fini
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -370,3 +371,87 @@ def test_mock_omni_makes_a_local_clip_without_the_network(tmp_path):
     adapter._client = None  # any client use would go through make_client(), which refuses in mock mode
     clip = adapter.generate(render_card("x"), SceneSpec(order=1, scene="x", seconds=3.0), key="k")
     assert clip.data[4:8] == b"ftyp" and clip.cost_usd == 0.0 and clip.model == "mock-omni"
+
+
+# --- Review fixes (CodeRabbit on creator-agent#3) ---------------------------- #
+from tests.test_hosted import bearer, captured, hosted  # noqa: E402,F401 - reused hosted fixtures
+
+
+async def test_a_film_still_pausing_counts_toward_the_active_limit(hosted, client, captured):  # noqa: F811
+    async with get_sessionmaker()() as s:
+        film_a = await repo.create_job(s, "a", 30, user_id="u1")
+        await repo.set_status(s, film_a.id, JobStatus.RUNNING)
+        assert await repo.request_pause(s, film_a.id)  # A drains its paid clips: still a live runner
+    r = await client.post("/storyboard", json={"prompt": "film b", "duration": 30}, headers=bearer())
+    assert r.status_code == 429 and not captured
+    control.forget(film_a.id)
+
+
+async def test_checkpoint_history_only_averages_the_callers_own_runs(hosted, client):  # noqa: F811
+    from app.db.models import RunLedger, SpendEvent
+
+    async with get_sessionmaker()() as s:
+        for jid, uid, cost in (("other-run", "someone-else", 9.0), ("own-run", "u1", 1.0)):
+            s.add(RunLedger(job_id=jid, user_id=uid, status="completed",
+                            started_at=datetime.now(timezone.utc)))
+            s.add(SpendEvent(job_id=jid, user_id=uid, stage="music", category="music", model="m", cost_usd=cost))
+        await s.commit()
+        mine = await repo.create_job(s, "p", 30, user_id="u1")
+        await repo.set_status(s, mine.id, JobStatus.PAUSED)
+    cp = (await client.get(f"/storyboard/{mine.id}/checkpoint", headers=bearer())).json()
+    music = next(st for st in cp["stages"] if st["name"] == "music")
+    assert music["remaining_usd"] == pytest.approx(1.0)  # not 5.0, the cross-user average
+
+
+async def test_a_pause_signalled_during_the_db_read_still_stops_the_next_unit(monkeypatch):
+    from app.workers.control import signal_pause
+
+    async def read_then_signal(session, job_id):
+        signal_pause(job_id)  # the API process signals while our read is in flight
+        return False
+
+    monkeypatch.setattr("app.db.repository.pause_requested", read_then_signal)
+    ctl = RunControl("race-1", get_sessionmaker(), poll_seconds=0)
+    assert await ctl.requested() is True
+    control.forget("race-1")
+
+
+async def test_retry_wait_ends_early_on_a_pause_recorded_only_in_the_db():
+    job_id = await _job(JobStatus.RUNNING)
+    async with get_sessionmaker()() as s:
+        assert await repo.request_pause(s, job_id)  # another process: DB flag, no local event
+    control.clear_pause(job_id)
+    started = time.monotonic()
+    assert await RunControl(job_id, get_sessionmaker(), poll_seconds=0.05).wait(30) is True
+    assert time.monotonic() - started < 2
+    control.forget(job_id)
+
+
+async def test_a_failed_narration_line_is_retried_after_a_pause(artifact_root):
+    from app.adapters.errors import ProviderError
+    from app.adapters.llm import LLMAdapter
+    from app.adapters.tts import silent_wav
+    from app.agents.narration import voice_lines
+    from app.artifacts.store import ArtifactStore
+    from app.graph.state import Deps
+
+    s = Settings(gemini_api_key="", use_mock_providers=True)
+    ctl = _Ctl("narr-1")
+    calls: list[str] = []
+
+    class _TTS:
+        def synthesize(self, text):
+            calls.append(text)
+            if text == "one" and calls.count("one") == 1:
+                raise ProviderError("tts down")  # the first try at line 1 fails
+            ctl.flag = text == "two" and calls.count("two") == 1  # pause lands after line 2 starts
+            return silent_wav(1.0)
+
+    deps = Deps(settings=s, store=ArtifactStore(artifact_root, "narr-1"), llm=LLMAdapter(s), image=None,
+                tts=_TTS(), control=ctl)
+    with pytest.raises(JobPaused):
+        await voice_lines([(1, "one"), (2, "two"), (3, "three")], deps)
+    ctl.flag = False
+    await voice_lines([(1, "one"), (2, "two"), (3, "three")], deps)
+    assert calls == ["one", "two", "one", "three"]  # line 1 retried for real; line 2 not re-billed
+    assert not deps.store.exists("narration_01.failed")
