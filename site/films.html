@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Films · Creator Agent</title>
+  <meta name="description" content="Short films made with Creator Agent: a Tamil spy action short, a superhero comedy and a survival thriller, each made from one prompt.">
+  <meta property="og:title" content="Films made with Creator Agent">
+  <meta property="og:description" content="Three vertical short films, each made from one prompt: spoken dialogue, an original score, in English or Tamil.">
+  <meta property="og:image" content="films/og.jpg">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="theme-color" content="#050608">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+Tamil:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="preload" as="image" href="films/irumbukai-mayavi/frame.jpg">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="films.css">
+  <script src="config.js"></script>
+  <script src="main.js" defer></script>
+  <script src="films.js" defer></script>
+</head>
+<body class="is-films">
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav" data-nav>
+    <div class="nav__inner">
+      <a class="brand" href="index.html" aria-label="Creator Agent home">
+        <span class="brand__bulb" aria-hidden="true"></span>
+        Creator Agent
+      </a>
+      <nav class="tabs" aria-label="Pages">
+        <a href="index.html">Overview</a>
+        <a href="films.html" aria-current="page">Films</a>
+      </nav>
+      <div class="nav__actions">
+        <a class="star" href="https://github.com/Adithya-nat/creator-agent" data-star>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+          <span data-star-count>GitHub</span>
+        </a>
+        <a class="btn btn--ghost btn--sm nav__signin" href="#" data-app-link="/login">Log in</a>
+        <a class="btn btn--light btn--sm" href="#" data-app-link="/signup">Sign up</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- Billboard: the featured film plays muted; the queue advances when it ends -->
+    <h1 class="sr-only">Films made with Creator Agent</h1>
+    <section class="bb" data-billboard aria-label="Featured film">
+      <canvas class="bb__ambient" data-ambient aria-hidden="true"></canvas>
+      <div class="bb__inner">
+        <div class="bb__copy" data-bb-copy></div>
+        <div class="bb__stage">
+          <div class="bb__screen">
+            <video class="bb__video" data-bb-video muted playsinline preload="auto" aria-hidden="true"></video>
+            <button class="bb__hit" type="button" data-bb-open aria-label="Play the featured film"></button>
+            <span class="gate__corner gate__corner--tl"></span><span class="gate__corner gate__corner--tr"></span>
+            <span class="gate__corner gate__corner--bl"></span><span class="gate__corner gate__corner--br"></span>
+            <button class="round bb__mute" type="button" data-bb-mute aria-label="Turn sound on"></button>
+          </div>
+        </div>
+      </div>
+      <div class="bb__queue" data-bb-queue role="tablist" aria-label="Featured films"></div>
+    </section>
+
+    <!-- Premieres: numbered poster row -->
+    <section class="row" aria-labelledby="row-premieres">
+      <div class="row__head">
+        <p class="reel__mark"><span class="reel__no">Now showing</span><span class="reel__tc" data-film-count></span></p>
+        <h2 class="row__title" id="row-premieres">Premieres</h2>
+        <div class="row__nav">
+          <button class="row__arrow" type="button" data-row-prev aria-label="Scroll back"></button>
+          <button class="row__arrow" type="button" data-row-next aria-label="Scroll forward"></button>
+        </div>
+      </div>
+      <ol class="row__track" data-row>
+        <li class="slot slot--yours">
+          <span class="slot__n" aria-hidden="true">4</span>
+          <a class="card card--yours" href="#" data-app-link="/signup">
+            <span class="yours__plus" aria-hidden="true"></span>
+            <b>Your film</b>
+            <span class="yours__line">Write one line. We'll premiere it here next.<span class="caret" aria-hidden="true"></span></span>
+            <span class="yours__cta">Sign up free</span>
+          </a>
+        </li>
+      </ol>
+    </section>
+
+    <!-- The prompt behind each film -->
+    <section class="lines" aria-labelledby="lines-title">
+      <div class="lines__head">
+        <p class="reel__mark"><span class="reel__no">Behind the films</span><span class="reel__tc">The prompts, unedited</span></p>
+        <h2 class="lit" id="lines-title" data-lit>One prompt in, a finished film out. <span>These are the exact prompts that made each film, with what each one took to render and what Google charged our key.</span></h2>
+      </div>
+      <div class="lines__grid" data-lines></div>
+    </section>
+
+    <section class="finale">
+      <canvas class="finale__beam" data-beam="soft" aria-hidden="true"></canvas>
+      <p class="cue finale__cue"><span class="cue__tri" aria-hidden="true"></span>Premiere 04</p>
+      <h2>Your film is next.</h2>
+      <div class="hero__ctas">
+        <a class="btn btn--light" href="#" data-app-link="/signup">Sign up free</a>
+        <a class="btn btn--ghost" href="index.html#how">See how it works</a>
+      </div>
+      <p class="hero__soon" id="beta-soon" data-soon hidden>Sign-up opens with the hosted beta soon. Until then, <a href="https://github.com/Adithya-nat/creator-agent#run-it-yourself">run it on your own machine</a>.</p>
+    </section>
+
+    <noscript>
+      <ul class="noscript-films">
+        <li><a href="films/irumbukai-mayavi/film.mp4">Irumbukai Mayavi (Tamil)</a></li>
+        <li><a href="films/escape-the-anaconda/film.mp4">Escape the Anaconda</a></li>
+        <li><a href="films/battle-sativa/film.mp4">Battle Sativa</a></li>
+      </ul>
+    </noscript>
+  </main>
+
+  <footer class="foot">
+    <p><span class="brand__bulb" aria-hidden="true"></span>Creator Agent</p>
+    <p>Every film here was made with Creator Agent from a single prompt. Videos are compressed for the web.</p>
+    <nav aria-label="Footer"><a href="https://github.com/Adithya-nat/creator-agent">GitHub</a><a href="https://github.com/Adithya-nat/creator-agent/blob/main/DEPLOY.md">Self-host</a><a href="index.html#retention">Data retention</a></nav>
+  </footer>
+
+  <!-- More info -->
+  <dialog class="info" data-info aria-labelledby="info-title">
+    <button class="round info__close" type="button" data-info-close aria-label="Close"></button>
+    <div class="info__media">
+      <video class="info__video" data-info-video muted loop playsinline preload="none" aria-hidden="true"></video>
+      <button class="round info__mute" type="button" data-info-mute aria-label="Turn sound on"></button>
+    </div>
+    <div class="info__body" data-info-body></div>
+  </dialog>
+
+  <!-- Theater -->
+  <dialog class="theater" data-theater aria-label="Film player">
+    <canvas class="theater__ambient" data-theater-ambient aria-hidden="true"></canvas>
+    <video class="theater__video" data-theater-video playsinline preload="auto"></video>
+    <div class="theater__flash" data-theater-flash aria-hidden="true"></div>
+    <div class="theater__top">
+      <button class="round round--ghost" type="button" data-theater-close aria-label="Back to films"></button>
+      <p class="theater__name"><b data-theater-title></b><span data-theater-meta></span></p>
+    </div>
+    <div class="theater__bar">
+      <div class="scrub" data-scrub>
+        <div class="scrub__rail"><span class="scrub__buf" data-scrub-buf></span><span class="scrub__fill" data-scrub-fill></span><span class="scrub__knob" data-scrub-knob></span></div>
+        <input class="scrub__input" data-scrub-input type="range" min="0" max="1000" step="1" value="0" aria-label="Seek">
+      </div>
+      <div class="theater__controls">
+        <button class="ctl" type="button" data-ctl="play" aria-label="Pause"></button>
+        <button class="ctl" type="button" data-ctl="back" aria-label="Back 10 seconds"></button>
+        <button class="ctl" type="button" data-ctl="fwd" aria-label="Forward 10 seconds"></button>
+        <button class="ctl" type="button" data-ctl="mute" aria-label="Mute"></button>
+        <span class="theater__time" data-theater-time>0:00 / 0:00</span>
+        <button class="ctl ctl--end" type="button" data-ctl="full" aria-label="Full screen"></button>
+      </div>
+    </div>
+    <div class="next" data-next hidden>
+      <p class="next__label">Up next in <span data-next-count>6</span></p>
+      <button class="next__card" type="button" data-next-go>
+        <img alt="" data-next-img>
+        <span><b data-next-title></b><i data-next-meta></i></span>
+      </button>
+      <button class="next__cancel" type="button" data-next-cancel>Stay here</button>
+    </div>
+  </dialog>
+</body>
+</html>

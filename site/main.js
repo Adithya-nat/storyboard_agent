@@ -16,6 +16,7 @@
       a.href = app + a.dataset.appLink;
       return;
     }
+    if (!soon) return;
     a.href = "#beta-soon";
     a.addEventListener("click", () => {
       soon.classList.remove("flash");
@@ -23,7 +24,7 @@
       soon.classList.add("flash");
     });
   });
-  if (!app) soon.hidden = false;
+  if (!app && soon) soon.hidden = false;
 
   // ---------- GitHub stars ----------
   fetch("https://api.github.com/repos/Adithya-nat/creator-agent")

@@ -33,3 +33,7 @@ TODOS.md
 
 # OAuth client secret downloads (Google Cloud console)
 client_secret_*.json
+
+# Raw sample film masters; web encodes live in site/films/
+sample_contents/
+!site/films/**/*.mp4
