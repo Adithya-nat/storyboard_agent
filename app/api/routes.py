@@ -13,6 +13,7 @@ Generation runs in the background (minutes). A client can either POLL (GET statu
 from __future__ import annotations
 
 import asyncio
+import weakref
 import json
 import mimetypes
 import os
@@ -145,7 +146,15 @@ async def _load_owned_job(session: AsyncSession, job_id: str, user: User):
 
 
 # Films run in this one process, so one lock makes "check the limits, then admit" atomic.
-_admission = asyncio.Lock()
+_admission_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _admission() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _admission_locks.get(loop)
+    if lock is None:
+        lock = _admission_locks[loop] = asyncio.Lock()
+    return lock
 
 
 async def _check_active_limits(session: AsyncSession, user: User) -> None:
@@ -203,7 +212,7 @@ async def create_storyboard(
         raise HTTPException(status_code=403, detail="Turnstile verification failed")
     settings = get_settings()
     api_key = _request_key(request)
-    async with _admission:
+    async with _admission():
         return await _admit_new(session, background, body, user, api_key)
 
 
@@ -297,9 +306,10 @@ async def resume_storyboard(
         )
 
     allow_stills = bool(body and body.allow_stills)
-    async with _admission:
+    async with _admission():
         await _check_active_limits(session, user)
-        await repo.mark_queued(session, job.id)
+        if not await repo.mark_queued(session, job.id):
+            raise HTTPException(status_code=409, detail="job is already running")
     background.add_task(run_job, job.id, job.prompt, job.duration, True, job.style, job.language,
                         allow_stills=allow_stills, api_key=api_key, user_id=job.user_id)
     return JobCreatedResponse(job_id=job.id, status=JobStatus.RUNNING)

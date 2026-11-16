@@ -327,6 +327,35 @@ async def test_sweep_retries_leftover_files_and_checkpoints(tmp_path, monkeypatc
         assert [r[0] for r in c.execute("SELECT thread_id FROM checkpoints")] == [live.id]
 
 
+async def test_two_resumes_of_one_film_start_one_runner(client, captured):
+    import asyncio
+
+    job = await _job()
+    async with get_sessionmaker()() as s:
+        await repo.set_status(s, job.id, JobStatus.FAILED, error="x")
+    codes = sorted(r.status_code for r in await asyncio.gather(
+        *(client.post(f"/storyboard/{job.id}/resume") for _ in range(3))))
+    assert codes[0] == 202 and all(c == 409 for c in codes[1:]) and len(captured) == 1
+    async with get_sessionmaker()() as s:  # a started runner is never knocked back to queued
+        await repo.set_status(s, job.id, JobStatus.RUNNING)
+        assert await repo.mark_queued(s, job.id) is False
+
+
+async def test_next_sweep_ignores_running_films_and_honours_paused_ttl():
+    from datetime import datetime, timedelta, timezone
+
+    running, paused = await _job(), await _job()
+    async with get_sessionmaker()() as s:
+        await repo.set_status(s, running.id, JobStatus.RUNNING)
+        await repo.set_status(s, paused.id, JobStatus.PAUSED)
+    await _age(running.id, 30)
+    await _age(paused.id, 30)
+    async with get_sessionmaker()() as s:
+        assert await repo.next_expiry(s, 86400) < datetime.now(timezone.utc)  # paused counts at 24h
+        nxt = await repo.next_expiry(s, 86400, paused_ttl_seconds=7 * 86400)
+    assert nxt is not None and nxt > datetime.now(timezone.utc) + timedelta(days=5)
+
+
 def test_allowlist_accepts_json_or_csv(monkeypatch):
     from app.core.config import Settings
 

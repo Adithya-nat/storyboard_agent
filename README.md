@@ -9,7 +9,7 @@ English or entirely Tamil.
 - **Web app:** [creator-agent-web](https://github.com/Adithya-nat/creator-agent-web)
 - **Bring your own key:** every film is made with the user's own Gemini API key.
 - **24-hour retention:** a film's prompt, script, media and logs are deleted 24 hours after it starts
-  (a film still rendering then is deleted as soon as it stops). Only cost totals are kept.
+  (a film still rendering then is deleted on the first sweep after it stops). Only cost totals are kept.
 
 **Run it yourself:** start with [SETUP.md](SETUP.md) (keys, spend limits, a setup checker).
 **Host it for others:** follow [DEPLOY.md](DEPLOY.md) (Neon, sign-in, a free server, the homepage).

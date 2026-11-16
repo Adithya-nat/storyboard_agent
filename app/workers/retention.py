@@ -58,7 +58,7 @@ async def sweep_once(settings: Settings) -> float:
     except Exception:  # noqa: BLE001 - retried on the next sweep
         log.warning("leftover cleanup failed; will retry", exc_info=True)
     async with get_sessionmaker()() as session:
-        nxt = await repo.next_expiry(session, settings.job_ttl_seconds)
+        nxt = await repo.next_expiry(session, settings.job_ttl_seconds, settings.paused_ttl_seconds)
     cap = settings.job_sweep_interval_seconds
     if nxt is None:
         return cap

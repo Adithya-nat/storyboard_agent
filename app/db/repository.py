@@ -321,14 +321,21 @@ async def delete_expired_jobs(
     return expired
 
 
-async def next_expiry(session: AsyncSession, ttl_seconds: int) -> datetime | None:
-    """When the oldest remaining job expires (None = no jobs)."""
-    oldest = await session.scalar(select(func.min(Job.created_at)))
-    if oldest is None:
-        return None
-    if oldest.tzinfo is None:
-        oldest = oldest.replace(tzinfo=timezone.utc)
-    return oldest + timedelta(seconds=ttl_seconds)
+async def next_expiry(
+    session: AsyncSession, ttl_seconds: int, paused_ttl_seconds: int | None = None
+) -> datetime | None:
+    """The next moment ``delete_expired_jobs`` could delete something (same rules); None = nothing to wait for."""
+    deadlines = []
+    for created, updated, status in (await session.execute(select(Job.created_at, Job.updated_at, Job.status))).all():
+        if status in _ACTIVE:  # a running film is deleted on a later sweep, once it stops
+            continue
+        start, ttl = created, ttl_seconds
+        if status == JobStatus.PAUSED.value and paused_ttl_seconds is not None:
+            start, ttl = (updated or created), paused_ttl_seconds
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        deadlines.append(start + timedelta(seconds=ttl))
+    return min(deadlines, default=None)
 
 
 ACTIVE = (JobStatus.QUEUED.value, JobStatus.RUNNING.value, JobStatus.PAUSING.value)
@@ -338,10 +345,13 @@ async def job_ids(session: AsyncSession) -> set[str]:
     return set((await session.execute(select(Job.id))).scalars().all())
 
 
-async def mark_queued(session: AsyncSession, job_id: str) -> None:
-    """Admitted for a (re)run: counts toward the active-film limits until its runner starts."""
-    await session.execute(update(Job).where(Job.id == job_id).values(status=JobStatus.QUEUED.value))
+async def mark_queued(session: AsyncSession, job_id: str) -> bool:
+    """Admit a stopped job for a (re)run; False if another request already admitted or started it."""
+    result = await session.execute(
+        update(Job).where(Job.id == job_id, Job.status.not_in(ACTIVE)).values(status=JobStatus.QUEUED.value)
+    )
     await session.commit()
+    return result.rowcount == 1
 
 
 async def count_active_jobs(session: AsyncSession, user_id: str | None = None) -> int:
