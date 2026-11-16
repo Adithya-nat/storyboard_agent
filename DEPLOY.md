@@ -45,10 +45,10 @@ touches it.
 1. In the `creator-agent` repo: **Settings → Pages → Build and deployment → Source: GitHub
    Actions.** (Already done for the main repo.)
 2. **Actions → Homepage → Run workflow** to publish now.
-3. Once the studio is online (step 6), set where "Start creating" goes:
+3. Once the studio is online (step 6), set where "Log in" and "Sign up" go:
    **Settings → Secrets and variables → Actions → Variables → New repository variable**,
    name `APP_URL`, value `https://app.<your-domain>`. Then run the workflow again.
-   Until `APP_URL` exists, the buttons say "Run it yourself" and link to the README.
+   Until `APP_URL` exists, those buttons point to an "opening soon" note with a link to run it yourself.
 
 Optional custom domain: Settings → Pages → Custom domain, then add a `CNAME` record pointing at
 `<your-user>.github.io`.
@@ -203,7 +203,7 @@ Coolify runs its own proxy for HTTPS, so don't also start the Caddy service.
 
 Set the `APP_URL` repository variable (step 2.3) and re-run the Homepage workflow.
 
-**Check:** the homepage's "Start creating" and "Sign in" go to `https://app.<domain>/login`.
+**Check:** the homepage's "Log in" goes to `https://app.<domain>/login` and "Sign up" to `https://app.<domain>/signup`. Signing up with Google or GitHub creates the account on first use; new accounts land in the studio with the Gemini key dialog open.
 
 ## 7. Environment reference
 
