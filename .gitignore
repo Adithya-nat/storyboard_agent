@@ -27,3 +27,9 @@ ratelimits_google_gemini.txt
 # Internal AI-agent build-handoff notes (local working notes, not for public repo)
 TODOS.md
 .gstack/
+.neon
+.env.neon
+.env.bak*
+
+# OAuth client secret downloads (Google Cloud console)
+client_secret_*.json
