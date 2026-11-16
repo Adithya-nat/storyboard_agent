@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import User, allowed_user
 from app.core.config import get_settings
 from app.db import repository as repo
 from app.db.session import get_session
@@ -72,8 +73,8 @@ def _row(r) -> RunRow:
 
 
 @router.get("/budget")
-async def get_budget(session: AsyncSession = Depends(get_session)) -> dict:
-    return (await budget_status(session, get_settings())).dict()
+async def get_budget(session: AsyncSession = Depends(get_session), user: User = Depends(allowed_user)) -> dict:
+    return (await budget_status(session, get_settings(), user.scope)).dict()
 
 
 @router.get("/estimate")
@@ -81,6 +82,7 @@ async def get_estimate(
     style: Literal["narrated", "dialogue", "mixed"] = "dialogue",
     duration: int = Query(30),
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(allowed_user),
 ) -> dict:
     if duration not in (30, 60):
         raise HTTPException(status_code=422, detail="duration must be 30 or 60")
@@ -92,15 +94,18 @@ async def get_runs(
     limit: int = Query(50, ge=1, le=500),
     before: datetime | None = None,
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(allowed_user),
 ) -> list[RunRow]:
-    return [_row(r) for r in await repo.list_runs(session, limit=limit, before=before)]
+    return [_row(r) for r in await repo.list_runs(session, limit=limit, before=before, user_id=user.scope)]
 
 
 @router.get("/usage/summary", response_model=UsageSummary)
-async def get_summary(range: Range = "30d", session: AsyncSession = Depends(get_session)) -> UsageSummary:
+async def get_summary(
+    range: Range = "30d", session: AsyncSession = Depends(get_session), user: User = Depends(allowed_user)
+) -> UsageSummary:
     since = _since(range)
-    runs = await repo.runs_since(session, since)
-    events = await repo.spend_events_since(session, since)
+    runs = await repo.runs_since(session, since, user.scope)
+    events = await repo.spend_events_since(session, since, user.scope)
     finished = [r for r in runs if r.finished_at is not None]
     completed = [r for r in finished if r.status.startswith("completed")]
     total = sum(e.cost_usd for e in events)

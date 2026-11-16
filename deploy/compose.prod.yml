@@ -1,0 +1,56 @@
+# Hosted Creator Agent on one server: API + web app + Caddy (automatic HTTPS).
+# Expects creator-agent and creator-agent-web cloned side by side. See DEPLOY.md.
+#   cp deploy/.env.example deploy/.env   # fill it in
+#   docker compose -f deploy/compose.prod.yml --env-file deploy/.env up -d --build
+services:
+  api:
+    build: ..
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      AUTH_MODE: jwt
+      AUTH_JWKS_URL: https://${APP_DOMAIN}/api/auth/jwks
+      AUTH_ISSUER: https://${APP_DOMAIN}
+      ALLOWED_USERS: ${ALLOWED_USERS}
+      KEY_MODE: byok
+      GEMINI_API_KEY: ""
+      ASSET_SIGNING_SECRET: ${ASSET_SIGNING_SECRET}
+      CORS_ORIGINS: https://${APP_DOMAIN}
+      USER_MONTHLY_BUDGET_USD: ${USER_MONTHLY_BUDGET_USD:-50}
+      MAX_ACTIVE_JOBS: ${MAX_ACTIVE_JOBS:-3}
+      VALIDATE_MODELS_ON_STARTUP: "false"
+    volumes:
+      - artifacts:/data
+
+  web:
+    build:
+      context: ../../creator-agent-web
+      args:
+        NEXT_PUBLIC_API_BASE: https://${API_DOMAIN}
+        NEXT_PUBLIC_AUTH_ENABLED: "true"
+        NEXT_PUBLIC_HOMEPAGE_URL: ${HOMEPAGE_URL:-https://adithya-nat.github.io/creator-agent/}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      BETTER_AUTH_URL: https://${APP_DOMAIN}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [api, web]
+
+volumes:
+  artifacts:
+  caddy_data:

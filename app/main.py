@@ -14,9 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,36 +29,29 @@ from app.db import repository as repo
 from app.db.session import get_sessionmaker
 from app.api.usage import router as usage_router
 from app.api.live import router as live_router
+from app.api.account import router as account_router
+from app.api.controls import router as controls_router
 from app.core.images import raqm_available
+from app.core.keys import RedactKeysFilter
 from app.core.model_check import validate_models
 from app.graph.checkpoint import setup_checkpointer
+from app.workers.retention import sweep_once
 from app.observability import DBLogHandler, LogDrainer, configure_log_queue
 
 log = get_logger(__name__)
 
 
 async def _ttl_sweeper(settings) -> None:
-    """Periodically purge jobs past their TTL: delete DB rows + on-disk artifacts.
-
-    The GET handlers already 410 expired jobs immediately (lazy expiry); this
-    reclaims the disk + DB space on a fixed cadence. Defensive: a sweep failure is
-    logged and the loop continues, so cleanup never takes the app down."""
-    sessionmaker = get_sessionmaker()
+    """Deletes expired jobs on time, sleeping until the next expiry (so Neon can scale to zero)."""
     while True:
         try:
-            await asyncio.sleep(settings.job_sweep_interval_seconds)
-            async with sessionmaker() as session:
-                expired = await repo.delete_expired_jobs(
-                    session, settings.job_ttl_seconds
-                )
-            for job_id in expired:
-                shutil.rmtree(Path(settings.artifact_root) / job_id, ignore_errors=True)
-            if expired:
-                log.info("TTL sweep: purged %d expired job(s)", len(expired))
+            delay = await sweep_once(settings)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - never let the sweeper loop die silently
-            log.exception("TTL sweep failed; will retry next interval")
+            log.exception("retention sweep failed; will retry")
+            delay = settings.job_sweep_interval_seconds
+        await asyncio.sleep(delay)
 
 
 @asynccontextmanager
@@ -82,6 +73,7 @@ async def lifespan(app: FastAPI):
     if settings.enable_log_streaming:
         configure_log_queue(settings.log_queue_max)
         handler = DBLogHandler()
+        handler.addFilter(RedactKeysFilter())
         handler.setLevel(getattr(logging, settings.log_capture_level.upper(), logging.INFO))
         logging.getLogger("app").addHandler(handler)
         drainer = LogDrainer(
@@ -124,7 +116,7 @@ async def lifespan(app: FastAPI):
             logging.getLogger("app").removeHandler(handler)
 
 
-app = FastAPI(title="Storyboard Agent", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Creator Agent", version="0.2.0", lifespan=lifespan)
 
 # CORS: the Next.js frontend runs on a different origin, so the browser requires
 # these headers to call the API at all (status, SSE, logs, and file downloads are
@@ -145,6 +137,8 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(storyboard_router)
 app.include_router(usage_router)
 app.include_router(live_router)
+app.include_router(account_router)
+app.include_router(controls_router)
 
 
 @app.get("/health")
@@ -153,6 +147,8 @@ async def health() -> dict:
     return {
         "status": "ok",
         "mock_mode": s.mock_mode,
+        "auth_mode": s.auth_mode,
+        "key_mode": s.key_mode,
         "models": getattr(app.state, "model_check", {"checked": False}),
         "tamil_shaping": raqm_available(),
     }

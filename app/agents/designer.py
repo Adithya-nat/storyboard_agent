@@ -10,6 +10,7 @@ import asyncio
 import re
 
 from app.adapters.errors import ProviderError
+from app.workers.control import JobPaused, PauseRequested, gate
 from app.core.logging import get_logger
 from app.graph.state import Deps, StoryboardState
 from app.prompts import render
@@ -75,6 +76,7 @@ async def _build_cast(
     store, warnings = deps.store, []
     cast = [c for c in script.characters if c.look.strip()][:MAX_CAST]
     sem = asyncio.Semaphore(max(1, deps.settings.image_max_concurrency))
+    held_sheets: list[str] = []  # sheets a pause stopped before they started
 
     async def one(char) -> tuple[str, list[str]]:
         paths: list[str] = []
@@ -92,7 +94,11 @@ async def _build_cast(
             )
             try:
                 async with sem:
+                    await gate(deps)
                     img = await asyncio.to_thread(deps.image.generate_image, prompt, refs=refs)
+            except PauseRequested:
+                held_sheets.append(name)
+                break
             except ProviderError as exc:
                 warnings.append(f"designer: {char.name} reference sheet failed ({exc}); text-only for that view")
                 continue
@@ -101,6 +107,9 @@ async def _build_cast(
         return char.name.upper(), paths
 
     results = await asyncio.gather(*(one(c) for c in cast))
+    if held_sheets:
+        kept = sum(len(p) for _, p in results)
+        raise JobPaused("designer", f"Paused while casting; {kept} reference sheet(s) kept")
     cast_paths = {name: paths for name, paths in results if paths}
     if cast:
         log.info("cast ready: %s", ", ".join(f"{n} ({len(p)} views)" for n, p in cast_paths.items()) or "none")
@@ -117,6 +126,7 @@ async def _build_locations(shotlist: Shotlist, style_ref: bytes | None, deps: De
     used = {sh.location.strip().upper() for sh in shotlist.shots if sh.location.strip()}
     specs = {loc.tag.strip().upper(): loc for loc in shotlist.locations if loc.tag.strip().upper() in used}
     sem = asyncio.Semaphore(max(1, deps.settings.image_max_concurrency))
+    held_plates: list[str] = []
 
     async def one(tag: str, look: str) -> tuple[str, str | None]:
         name = plate_name(tag)
@@ -125,13 +135,20 @@ async def _build_locations(shotlist: Shotlist, style_ref: bytes | None, deps: De
         prompt = render("designer/location_plate", tag=tag, look=look, style_bible=shotlist.style_bible[:1500])
         try:
             async with sem:
+                await gate(deps)
                 img = await asyncio.to_thread(deps.image.generate_image, prompt, refs=[b for b in (style_ref,) if b])
+        except PauseRequested:
+            held_plates.append(tag)
+            return tag, None
         except ProviderError as exc:
             warnings.append(f"designer: location plate {tag} failed ({exc}); text-only set for that place")
             return tag, None
         return tag, store.save_bytes(name, img)
 
     results = await asyncio.gather(*(one(t, specs[t].look if t in specs else t) for t in sorted(used)))
+    if held_plates:
+        kept = sum(1 for _, p in results if p)
+        raise JobPaused("designer", f"Paused while building sets; {kept} location plate(s) kept")
     paths = {t: p for t, p in results if p}
     if paths:
         log.info("locations ready: %s", ", ".join(paths))
@@ -192,9 +209,18 @@ async def designer(state: StoryboardState, deps: Deps) -> StoryboardState:
             style_ref_path = None
 
     style_ref = store.load_bytes(style_ref_path) if style_ref_path else None
-    (cast_paths, cast_warnings), (location_paths, loc_warnings) = await asyncio.gather(
-        _build_cast(script, shotlist, style_ref, deps), _build_locations(shotlist, style_ref, deps)
+    # return_exceptions: on a pause, the other branch still drains its in-flight images
+    # (they're billed either way) before the stage stops.
+    built = await asyncio.gather(
+        _build_cast(script, shotlist, style_ref, deps), _build_locations(shotlist, style_ref, deps),
+        return_exceptions=True,
     )
+    for result in built:
+        if isinstance(result, BaseException) and not isinstance(result, JobPaused):
+            raise result
+    if pauses := [r for r in built if isinstance(r, JobPaused)]:
+        raise JobPaused("designer", "; ".join(p.message for p in pauses))
+    (cast_paths, cast_warnings), (location_paths, loc_warnings) = built
 
     return {
         "shotlist_path": shotlist_path,

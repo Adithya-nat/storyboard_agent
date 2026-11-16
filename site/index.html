@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Creator Agent: AI short films, made your way</title>
+  <meta name="description" content="Open-source AI film studio for creators. Write one line and get a vertical short film with an original cast, spoken dialogue and a score, in English or Tamil. Bring your own Gemini key. Everything is deleted after 24 hours.">
+  <meta property="og:title" content="Creator Agent">
+  <meta property="og:description" content="Write one line. Get a finished vertical short film, made the way you want it. Open source, bring your own key.">
+  <meta property="og:image" content="og.png">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="theme-color" content="#050608">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+Tamil:wght@500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="config.js"></script>
+  <script src="main.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <div class="ribbon">
+    <span class="ribbon__grain" aria-hidden="true"></span>
+    <a href="#key">Open beta: bring your own Gemini key and make your first film tonight</a>
+  </div>
+
+  <header class="nav" data-nav>
+    <div class="nav__inner">
+      <a class="brand" href="#top" aria-label="Creator Agent home">
+        <span class="brand__bulb" aria-hidden="true"></span>
+        Creator Agent
+      </a>
+      <nav class="nav__links" aria-label="Sections">
+        <a href="#how">How it works</a>
+        <a href="#key">Your key</a>
+        <a href="#retention">24 hours</a>
+        <a href="#source">Open source</a>
+      </nav>
+      <div class="nav__actions">
+        <a class="star" href="https://github.com/Adithya-nat/creator-agent" data-star>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+          <span data-star-count>GitHub</span>
+        </a>
+        <a class="btn btn--ghost btn--sm nav__signin" href="#" data-app-link="/login">Sign in</a>
+        <a class="btn btn--light btn--sm" href="#" data-app-link="/login" data-cta>Start creating</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- Hero: the projector beam + the gate where a film gets made -->
+    <section class="hero" id="top">
+      <canvas class="hero__beam" data-beam aria-hidden="true"></canvas>
+      <div class="hero__inner">
+        <div class="hero__copy">
+          <p class="cue"><span class="cue__tri" aria-hidden="true"></span>Open source, bring your own key</p>
+          <h1 class="hero__title">
+            AI films, made the way you want them.
+            <span class="dim">Write one line. Creator Agent writes it, casts it, films every scene with spoken dialogue, scores it and cuts a vertical short.</span>
+          </h1>
+          <div class="hero__ctas">
+            <a class="btn btn--light" href="#" data-app-link="/login" data-cta>Start creating</a>
+            <a class="btn btn--ghost" href="https://github.com/Adithya-nat/creator-agent">Read the source</a>
+          </div>
+          <p class="hero__meta">English or Tamil. 30 or 60 seconds. 9:16, ready to post.</p>
+          <p class="hero__soon" data-soon hidden>The hosted beta opens soon. Until then, run it on your own machine.</p>
+        </div>
+
+        <figure class="gate" data-gate aria-label="A film being made from one line">
+          <div class="gate__frame">
+            <span class="gate__corner gate__corner--tl"></span><span class="gate__corner gate__corner--tr"></span>
+            <span class="gate__corner gate__corner--bl"></span><span class="gate__corner gate__corner--br"></span>
+            <div class="gate__hud">
+              <span class="rec" aria-hidden="true"></span>
+              <span class="tc" data-gate-tc>00:00:00:00</span>
+            </div>
+            <div class="gate__screen">
+              <div class="gate__step gate__step--prompt is-on" data-step="prompt">
+                <p class="gate__label">Your idea</p>
+                <p class="gate__prompt"><span data-typed></span><span class="caret" aria-hidden="true"></span></p>
+              </div>
+              <ol class="gate__step gate__step--crew" data-step="crew">
+                <li data-crew>Brief</li>
+                <li data-crew>Script</li>
+                <li data-crew>Cast</li>
+                <li data-crew>Filming <span data-scene>scene 1 of 3</span></li>
+                <li data-crew>Score and cut</li>
+              </ol>
+              <div class="gate__step gate__step--ready" data-step="ready">
+                <div class="play" aria-hidden="true"><span></span></div>
+                <p class="gate__title" data-film-title>The Keeper and the Storm</p>
+                <p class="gate__sub">Film ready, 0:31</p>
+                <p class="gate__line"><b>Keeper</b> You again? Every night, you knock.</p>
+              </div>
+            </div>
+          </div>
+          <figcaption class="gate__cap">One line in. A finished short out.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <div class="ticker" aria-label="What every film includes">
+      <div class="ticker__track" data-ticker>
+        <span>Characters speak on camera</span><span>Lip-synced voices</span><span>English</span><span>Tamil</span>
+        <span>An original score</span><span>A consistent cast</span><span>Vertical 9:16</span><span>Captions and post copy</span>
+        <span>Watch every step live</span><span>MIT licensed</span>
+      </div>
+    </div>
+
+    <!-- Reel 1: the pipeline is a real sequence, so the shots are numbered -->
+    <section class="reel" id="how">
+      <div class="reel__head">
+        <p class="reel__mark"><span class="reel__no">Reel 1</span><span class="reel__tc">00:00:31:00</span></p>
+        <h2 class="lit" data-lit>One line in, a finished film out. <span>A small crew of AI agents writes, casts, films, scores and edits, and you can watch every shot being made.</span></h2>
+      </div>
+
+      <ol class="shots" data-shots>
+        <li class="shot" style="--n:0">
+          <h3><span class="shot__n">Shot 1</span> Brief</h3>
+          <p>Your line becomes a plan: the format, the hook in the first two seconds, the setting and how people speak there.</p>
+          <div class="pane pane--brief" aria-hidden="true">
+            <dl>
+              <div><dt>Format</dt><dd data-fill="Two-hander, one night">&nbsp;</dd></div>
+              <div><dt>Hook</dt><dd data-fill="A knock on a lighthouse door at 3 a.m.">&nbsp;</dd></div>
+              <div><dt>Speech</dt><dd data-fill="Coastal Tamil, today">&nbsp;</dd></div>
+            </dl>
+          </div>
+        </li>
+        <li class="shot" style="--n:1">
+          <h3><span class="shot__n">Shot 2</span> Script</h3>
+          <p>Scenes broken into shots, with dialogue written in the language your audience actually speaks.</p>
+          <div class="pane pane--script" aria-hidden="true">
+            <p class="ln"><b>KEEPER</b> You again? Every night, you knock.</p>
+            <p class="ln"><b>STORM</b> Someone has to keep you company.</p>
+            <p class="ln ta" lang="ta"><b>காவலர்</b> இன்னைக்கும் வந்துட்டியா?</p>
+          </div>
+        </li>
+        <li class="shot" style="--n:2">
+          <h3><span class="shot__n">Shot 3</span> Cast</h3>
+          <p>An original cast with reference sheets and voices, so the same faces and voices appear in every scene.</p>
+          <div class="pane pane--cast" aria-hidden="true">
+            <div class="chip-card" style="--d:0"><span class="mono">K</span><b>Keeper</b><i>low, weathered</i></div>
+            <div class="chip-card" style="--d:1"><span class="mono">S</span><b>Storm</b><i>bright, teasing</i></div>
+            <div class="chip-card" style="--d:2"><span class="mono">G</span><b>Gull</b><i>silent</i></div>
+          </div>
+        </li>
+        <li class="shot" style="--n:3">
+          <h3><span class="shot__n">Shot 4</span> Scenes</h3>
+          <p>Each scene is filmed as AI video with the characters speaking their lines on camera.</p>
+          <div class="pane pane--scenes" aria-hidden="true">
+            <p class="pane__status"><span class="dot"></span>Filming <span data-shots-count>0</span>/48 frames</p>
+            <div class="cells" data-cells></div>
+          </div>
+        </li>
+        <li class="shot" style="--n:4">
+          <h3><span class="shot__n">Shot 5</span> Score and cut</h3>
+          <p>An original score ducks under the dialogue, then the edit, cover image and post copy are ready.</p>
+          <div class="pane pane--cut" aria-hidden="true">
+            <div class="wave" data-wave></div>
+            <div class="timeline"><span class="cut" style="--x:31%"></span><span class="cut" style="--x:64%"></span><span class="head"></span></div>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <!-- Reel 2: bring your own key -->
+    <section class="reel reel--split" id="key">
+      <div class="reel__head">
+        <p class="reel__mark"><span class="reel__no">Reel 2</span><span class="reel__tc">00:01:02:00</span></p>
+        <h2 class="lit" data-lit>Your key, your bill. <span>Paste a Gemini API key from Google AI Studio. It stays in your browser, and our server holds it in memory only while your film renders.</span></h2>
+        <ul class="facts">
+          <li><b>AI video needs billing turned on</b> for your key's Google project.</li>
+          <li><b>A 30-second film has cost us $5 to $8</b> in our own runs. You see an estimate before every film.</li>
+          <li><b>Nothing to install.</b> Sign in, paste your key, write a line.</li>
+        </ul>
+        <a class="link" href="https://aistudio.google.com/apikey">Get a key in Google AI Studio</a>
+      </div>
+
+      <div class="keybox" data-keybox aria-hidden="true">
+        <p class="keybox__title">Your Gemini API key</p>
+        <div class="keybox__field"><span data-key-typed></span><span class="caret"></span></div>
+        <p class="keybox__lock"><span class="lock" data-lock></span>Stays in this browser</p>
+        <ul class="keybox__checks">
+          <li data-check>Script</li><li data-check>Images</li><li data-check>Voices</li>
+          <li data-check>Music</li><li data-check>AI video</li><li data-check>Captions</li>
+        </ul>
+        <p class="keybox__ok" data-key-ok>Ready to make films.</p>
+      </div>
+    </section>
+
+    <!-- Reel 3: 24-hour retention -->
+    <section class="reel reel--split reel--flip" id="retention">
+      <div class="clock" data-clock aria-hidden="true">
+        <svg viewBox="0 0 200 200">
+          <circle class="clock__track" cx="100" cy="100" r="88"/>
+          <circle class="clock__arc" cx="100" cy="100" r="88" data-clock-arc/>
+        </svg>
+        <div class="clock__read">
+          <span class="clock__time" data-clock-time>24:00:00</span>
+          <span class="clock__label">until it's deleted</span>
+        </div>
+      </div>
+
+      <div class="reel__head">
+        <p class="reel__mark"><span class="reel__no">Reel 3</span><span class="reel__tc">00:01:33:00</span></p>
+        <h2 class="lit" data-lit>Gone in 24 hours. <span>Everything a film makes is deleted 24 hours after you start it. Download what you want to keep.</span></h2>
+        <div class="ledger">
+          <div class="ledger__gone">
+            <h3>Deleted after 24 hours</h3>
+            <ul><li>Your prompt</li><li>Script and dialogue</li><li>Cast, images and clips</li><li>The finished film</li><li>Logs</li></ul>
+          </div>
+          <div class="ledger__kept">
+            <h3>Kept</h3>
+            <ul><li>Your name and email, for sign-in</li><li>Cost totals per film, without the prompt, for your usage page</li></ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Reel 4: open source -->
+    <section class="reel reel--split" id="source">
+      <div class="reel__head">
+        <p class="reel__mark"><span class="reel__no">Reel 4</span><span class="reel__tc">00:02:04:00</span></p>
+        <h2 class="lit" data-lit>Open source, end to end. <span>MIT licensed. Run the whole studio on your own machine with your own key, or read exactly what the hosted beta does with your data.</span></h2>
+        <div class="repos">
+          <a href="https://github.com/Adithya-nat/creator-agent"><b>creator-agent</b><span>The agents, the API and this page</span></a>
+          <a href="https://github.com/Adithya-nat/creator-agent-web"><b>creator-agent-web</b><span>The studio you make films in</span></a>
+          <a href="https://github.com/Adithya-nat/creator-agent/blob/main/DEPLOY.md"><b>DEPLOY.md</b><span>Host your own copy for free</span></a>
+        </div>
+      </div>
+      <div class="term" aria-label="Run it locally">
+        <div class="term__bar"><span></span><span></span><span></span></div>
+        <pre class="term__body" data-term></pre>
+      </div>
+    </section>
+
+    <section class="faq" aria-labelledby="faq-title">
+      <h2 id="faq-title">Questions</h2>
+      <div class="faq__list">
+        <details><summary>What does a film cost?</summary><p>You pay Google directly through your own key. A 30-second film with on-camera dialogue has cost us about $5 to $8; most of that is AI video. The studio shows an estimate before you start and the real cost after.</p></details>
+        <details><summary>How long does a film take?</summary><p>Usually 10 to 20 minutes for 30 seconds. You can watch each step live and leave the page; the film keeps rendering.</p></details>
+        <details><summary>Which languages can I make films in?</summary><p>English and Tamil. A film is entirely in one language, from the dialogue to the captions and the post copy.</p></details>
+        <details><summary>Is my key safe?</summary><p>Your key is stored only in your browser. It travels with the request that starts or resumes a film, is held in memory while that film renders, and is never written to the database or logs. You can remove it any time.</p></details>
+        <details><summary>Who can sign in?</summary><p>Anyone can sign in with GitHub or Google. During the beta, new accounts are let in in small batches, so you may wait a little before you can make films.</p></details>
+        <details><summary>Can I run it without the hosted beta?</summary><p>Yes. Clone both repositories, add your key to <code>.env</code> and run <code>make setup && make dev</code>. Nothing leaves your machine except calls to Google.</p></details>
+      </div>
+    </section>
+
+    <section class="finale">
+      <canvas class="finale__beam" data-beam="soft" aria-hidden="true"></canvas>
+      <h2>Your next short starts with one line.</h2>
+      <div class="hero__ctas">
+        <a class="btn btn--light" href="#" data-app-link="/login" data-cta>Start creating</a>
+        <a class="btn btn--ghost" href="https://github.com/Adithya-nat/creator-agent">Star on GitHub</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p><span class="brand__bulb" aria-hidden="true"></span>Creator Agent</p>
+    <p>MIT licensed. Films are made with Google Gemini models using your own key.</p>
+    <nav aria-label="Footer"><a href="https://github.com/Adithya-nat/creator-agent">GitHub</a><a href="https://github.com/Adithya-nat/creator-agent/blob/main/DEPLOY.md">Self-host</a><a href="#retention">Data retention</a></nav>
+  </footer>
+</body>
+</html>

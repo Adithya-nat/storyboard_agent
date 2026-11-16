@@ -1,0 +1,42 @@
+# Publishes site/ (the homepage) to GitHub Pages on every push to main that touches it.
+name: Homepage
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Point the sign-in buttons at the hosted app
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          printf 'window.CREATOR_AGENT = { appUrl: %s };\n' "$(jq -Rn --arg u "$APP_URL" '$u')" > site/config.js
+          cat site/config.js
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

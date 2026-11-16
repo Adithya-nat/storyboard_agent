@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from app.adapters.errors import ProviderError
+from app.workers.control import PauseRequested, gate, paused
 from app.adapters.tts import silent_wav, wav_duration_seconds
 from app.agents.script_writer import WORDS_PER_SECOND
 from app.core.logging import get_logger
@@ -40,18 +41,27 @@ async def voice_lines(
     floor, pad = settings.narration_floor_seconds, settings.narration_pad_seconds
     out: list[SceneAudioMeta] = []
     warnings: list[str] = []
-    for order, text in items:
+    for i, (order, text) in enumerate(items):
         name = f"narration_{order:02d}.wav"
-        if store.exists(name):
+        failed = f"narration_{order:02d}.failed"  # silence stood in; resume retries it for real
+        if store.exists(name) and not store.exists(failed):
             wav = store.load_bytes(store.abspath(name))
         else:
+            try:
+                await gate(deps)  # each line is its own paid call
+            except PauseRequested:
+                raise paused("narration", i, len(items), "narration lines") from None
+            ok = True
             try:
                 wav = await asyncio.to_thread(deps.tts.synthesize, text)
             except ProviderError as exc:
                 log.warning("narration for scene %s failed (%s); using silence", order, exc)
                 warnings.append(f"narration: scene {order} voiceover failed ({exc}); silent")
-                wav = silent_wav(floor)
+                wav, ok = silent_wav(floor), False
+                store.write_marker(failed)
             store.save_bytes(name, wav)
+            if ok:  # only once the real voiceover is safely on disk
+                store.remove(failed)
         out.append(SceneAudioMeta(
             order=order, voice="narrator", path=store.abspath(name),
             hold=max(floor, wav_duration_seconds(wav) + pad, (min_holds or {}).get(order, 0.0)), caption=text,

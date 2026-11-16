@@ -43,9 +43,9 @@ async def estimate(session: AsyncSession, *, style: str, duration: int, omni: bo
     return estimate_job_cost(duration=duration, style=style, omni_enabled=omni, history_avg_per_second=per_s)
 
 
-async def budget_status(session: AsyncSession, settings: Settings) -> BudgetStatus:
-    spent = await repo.spend_since(session, repo.month_start())
-    cap = settings.monthly_budget_usd
+async def budget_status(session: AsyncSession, settings: Settings, user_id: str | None = None) -> BudgetStatus:
+    spent = await repo.spend_since(session, repo.month_start(), user_id=user_id)
+    cap = settings.budget_cap_usd
     remaining = max(0.0, cap - spent)
     estimates: dict[str, dict[str, float]] = {}
     left: dict[str, int] = {}

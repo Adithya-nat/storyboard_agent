@@ -187,6 +187,9 @@ class OmniVideoAdapter:
     def generate(self, image: bytes, spec: SceneSpec, *, key: str) -> OmniClip:
         """Image + scene spec -> mp4 bytes (with audio). Raises ProviderError when no model can."""
         seconds = clip_seconds(spec)
+        if self.settings.mock_mode:
+            # A local still-clip, never the network (make_client() also refuses in mock mode).
+            return self._mock_clip(image, seconds)
         prompt = build_prompt(spec, seconds)
         cost, renders, last, first = 0.0, 0, None, None
         first_issues: list[str] = []
@@ -219,6 +222,22 @@ class OmniVideoAdapter:
                 log.warning("omni model %s daily quota spent; trying the next", model)
                 last = exc
         raise ProviderError(f"no Omni model available today: {last}")
+
+    def _mock_clip(self, image: bytes, seconds: int) -> OmniClip:
+        """MOCK mode: the still frame as a silent 9:16 clip (local ffmpeg, no API, no cost)."""
+        if self.settings.mock_unit_delay_seconds > 0:
+            time.sleep(self.settings.mock_unit_delay_seconds)
+        with tempfile.TemporaryDirectory() as d:
+            src, dst = Path(d) / "frame", Path(d) / "clip.mp4"
+            src.write_bytes(image)
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-i", str(src), "-f", "lavfi",
+                 "-i", "anullsrc=r=48000:cl=stereo", "-t", str(seconds), "-vf", "scale=360:640,format=yuv420p",
+                 "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", str(dst)],
+                check=True,
+            )
+            data = dst.read_bytes()
+        return OmniClip(data=data, model="mock-omni", seconds=seconds, cost_usd=0.0, renders=1)
 
     # ------------------------------------------------------------------ #
     def _with_retries(self, model: str, image: bytes, prompt: str, seconds: int, key: str) -> bytes:

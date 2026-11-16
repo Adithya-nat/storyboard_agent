@@ -12,12 +12,17 @@ from app.core.config import get_settings
 from app.db.models import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
 target_metadata = Base.metadata
 
 
+def _ours(obj, name, type_, reflected, compare_to) -> bool:
+    # Never touch tables we don't model (LangGraph checkpoints; Better Auth lives in schema "auth").
+    return not (type_ == "table" and reflected and compare_to is None)
+
+
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(connection=connection, target_metadata=target_metadata, include_object=_ours)
     with context.begin_transaction():
         context.run_migrations()
 

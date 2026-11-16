@@ -1,0 +1,7 @@
+# Cloudflare Tunnel variant: publish the app ports on loopback only and run without Caddy.
+#   docker compose -f deploy/compose.prod.yml -f deploy/compose.tunnel.yml --env-file deploy/.env up -d --build api web
+services:
+  api:
+    ports: ["127.0.0.1:8000:8000"]
+  web:
+    ports: ["127.0.0.1:3000:3000"]

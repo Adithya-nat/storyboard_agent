@@ -5,6 +5,11 @@ A scene blocked by a content policy is rewritten to comply (and, if needed, its 
 frame redrawn) instead of failing. Billing and quota errors still stop the job for Resume.
 Each finished clip is recorded in the manifest immediately, so an interruption never
 re-bills it.
+
+Pause: a scene passes the run-control gate after it gets a concurrency slot and before
+it submits. Once a pause is requested, scenes already submitted finish (they're billed
+either way) and are kept; queued scenes don't start. The stage then raises ``JobPaused``,
+and a resume starts at the first scene without a clip.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from app.core.logging import get_logger
 from app.graph.state import Deps, MotionClipMeta, StoryboardState
 from app.prompts import render
 from app.schemas import Script, Shotlist
+from app.workers.control import PauseRequested, gate, interruptible_sleep, paused, track
 
 log = get_logger(__name__)
 
@@ -175,9 +181,13 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
             clips[order] = meta
             save_manifest()  # survives an interruption: Resume never re-bills this clip
 
+    held: set[int] = set()  # scenes a pause stopped before they were submitted
+
     async def gen(order: int, image: bytes, spec: SceneSpec):
         async with sem:
-            return await asyncio.to_thread(deps.video.generate, image, spec, key=f"{state['job_id']}-{order}")
+            await gate(deps)  # last moment before money is spent on this scene
+            with track(deps, "motion", order):
+                return await asyncio.to_thread(deps.video.generate, image, spec, key=f"{state['job_id']}-{order}")
 
     async def rescue(order: int, image: bytes, spec: SceneSpec, exc: ContentBlocked):
         await note(f"scene {order}: blocked by Google's {_label(exc.code)}; rewriting the scene to comply")
@@ -299,21 +309,36 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
         except ProviderError as exc:
             log.warning("AI video for scene %s failed (%s); keeping the still", order, exc)
             warnings.append(f"video: scene {order} not generated ({exc}); kept still")
+        except PauseRequested:
+            held.add(order)
         finally:
-            async with lock:
-                done += 1
-                if reporter is not None:
-                    await reporter.progress(done, total)
+            if order not in held:
+                async with lock:
+                    done += 1
+                    if reporter is not None:
+                        await reporter.progress(done, total)
+
+    def stop_for_pause():
+        save_manifest()
+        log.info("AI video paused: %d/%d clip(s) kept; resume starts at scene %d",
+                 len(clips), total, min(held) if held else len(clips) + 1)
+        return paused("motion", len(clips), total, "AI clips")
 
     await asyncio.gather(*(one(f) for f in frames))
+    if held:
+        raise stop_for_pause()
     # Quota/rate failures usually clear after a pause; content blocks were already rescued inline.
     retry = [f for f in frames if f["order"] not in clips and f["order"] not in blocked]
     if retry and strict:
         log.info("retrying %d scene(s) in %.0fs", len(retry), deps.settings.ai_video_retry_delay_seconds)
-        await asyncio.sleep(deps.settings.ai_video_retry_delay_seconds)
+        if await interruptible_sleep(deps, deps.settings.ai_video_retry_delay_seconds):
+            held.update(f["order"] for f in retry)
+            raise stop_for_pause()
         warnings[:] = [w for w in warnings if "blocked by Google" in w]
         done = total - len(retry)
         await asyncio.gather(*(one(f) for f in retry))
+        if held:
+            raise stop_for_pause()
     missing = [f["order"] for f in frames if f["order"] not in clips and f["order"] not in stills]
     ordered = [clips[o] for o in sorted(clips)]
     manifest = save_manifest()

@@ -2,6 +2,10 @@
 
 Atomic acquire -> run graph (checkpointer when available) -> persist artifacts, status,
 tokens, spend and the run-ledger row. Resume re-runs idempotent nodes cheaply.
+
+Pause: a stage raises ``JobPaused`` once its in-flight paid units have drained (see
+app/workers/control.py). The runner then parks the job as ``paused``, unless the pause
+was withdrawn while draining, in which case it carries straight on from the same spot.
 """
 
 from __future__ import annotations
@@ -20,6 +24,8 @@ from app.adapters.tts import GeminiTTSAdapter
 from app.artifacts.rows import artifact_rows
 from app.artifacts.store import ArtifactStore
 from app.core.config import get_settings
+from app.core.keys import bind_key, redact, release_key
+from app.core.model_check import validate_models
 from app.core.logging import get_logger
 from app.db import repository as repo
 from app.db.session import get_sessionmaker
@@ -29,6 +35,7 @@ from app.graph.state import Deps
 from app.observability.reporter import ProgressReporter
 from app.observability.usage import UsageCollector, bind_collector, reset_collector
 from app.schemas import JobStatus
+from app.workers.control import JobPaused, RunControl, clear_pause, forget
 
 log = get_logger(__name__)
 
@@ -42,8 +49,34 @@ async def run_job(
     language: str | None = None,
     allow_motion: bool = True,
     allow_stills: bool = False,
+    api_key: str | None = None,
+    user_id: str | None = None,
+) -> None:
+    key_token = bind_key(api_key)
+    try:
+        await _run_job(job_id, prompt, duration, resume, style, language, allow_motion, allow_stills,
+                       api_key, user_id)
+    finally:
+        release_key(api_key, key_token)
+
+
+async def _run_job(
+    job_id: str,
+    prompt: str,
+    duration: int,
+    resume: bool,
+    style: str | None,
+    language: str | None,
+    allow_motion: bool,
+    allow_stills: bool,
+    api_key: str | None,
+    user_id: str | None,
 ) -> None:
     settings = get_settings()
+    if api_key:  # BYOK: this job's own settings copy; the key is never written anywhere
+        settings = settings.model_copy(update={"gemini_api_key": api_key})
+        if settings.validate_models_on_startup and not settings.mock_mode:
+            await validate_models(settings)
     sessionmaker = get_sessionmaker()
 
     # Atomic acquire — the real concurrency guard. If another runner already owns
@@ -54,6 +87,7 @@ async def run_job(
     if not acquired:
         log.warning("job %s already running; runner aborting (concurrent resume?)", job_id)
         return
+    clear_pause(job_id)  # a fresh/resumed run starts unpaused (the DB flag was cleared on acquire)
 
     # Token accounting: bind a collector for THIS job BEFORE the graph runs, so every
     # context copied by asyncio.gather/to_thread (the parallel image calls) shares it.
@@ -62,12 +96,13 @@ async def run_job(
     started = datetime.now(timezone.utc)
     async with sessionmaker() as session:
         await repo.upsert_run(
-            session, job_id, prompt=prompt, style=style, language=language,
+            session, job_id, prompt=prompt, style=style, language=language, user_id=user_id,
             duration=duration, status="running", started_at=started,
         )
 
     collector = UsageCollector()
     usage_token = bind_collector(collector)
+    paused: JobPaused | None = None
     try:
         try:
             store = ArtifactStore(settings.artifact_root, job_id)
@@ -90,6 +125,7 @@ async def run_job(
                 else None,
                 video=OmniVideoAdapter(settings) if settings.video_provider == "omni" and allow_motion else None,
                 allow_stills=allow_stills,
+                control=RunControl(job_id, sessionmaker),
             )
             config = {"configurable": {"thread_id": job_id}}
             init = {
@@ -113,8 +149,17 @@ async def run_job(
                     )
                     checkpointer = None
                 graph = build_graph(deps, checkpointer=checkpointer)
-                final = await _invoke(
-                    graph, init, config, resume, checkpointed=checkpointer is not None
+
+                async def settle_pause() -> None:
+                    # Every write this runner owes happens BEFORE the job becomes
+                    # resumable, so a fast resume's new run can't be overwritten.
+                    async with sessionmaker() as session:
+                        await _persist_tokens(session, job_id, collector)
+                    await _finish_ledger(job_id, {}, collector, JobStatus.PAUSED.value, started)
+
+                final, paused = await _drive(
+                    graph, init, config, resume, checkpointed=checkpointer is not None,
+                    control=deps.control, settle_pause=settle_pause,
                 )
         except Exception as exc:  # noqa: BLE001 - any failure -> visible FAILED status
             log.exception("job %s failed", job_id)
@@ -122,15 +167,55 @@ async def run_job(
                 # Best-effort: a failed job still shows the tokens/spend it used.
                 await _persist_tokens(session, job_id, collector)
                 await repo.set_status(
-                    session, job_id, JobStatus.FAILED, error=f"{type(exc).__name__}: {exc}"
+                    session, job_id, JobStatus.FAILED, error=redact(f"{type(exc).__name__}: {exc}")
                 )
             await _finish_ledger(job_id, {}, collector, "failed", started)
             return
+        if paused is not None:
+            # Parked: a resume may already own this job, so touch nothing shared after this.
+            log.info("job %s paused at %s: %s", job_id, paused.stage, paused.message)
+            return
     finally:
         reset_collector(usage_token)
+        if paused is None:  # a parked run already released its in-memory state before parking
+            forget(job_id)
 
     status = await _persist(job_id, final, collector)
     await _finish_ledger(job_id, final, collector, status, started)
+
+
+async def _drive(
+    graph, init: dict, config: dict, resume: bool, *, checkpointed: bool,
+    control: RunControl | None = None, settle_pause=None,
+) -> tuple[dict, JobPaused | None]:
+    """Run the graph; on a pause, park the job. Returns (final_state, pause_or_None).
+
+    Before parking, the runner finishes every write it owes (``settle_pause``) and drops
+    its in-memory state: once ``park_job`` commits, a resume can start a new runner at
+    any moment, and nothing of this one may land after that.
+
+    If the pause was withdrawn while in-flight units drained, ``park_job`` refuses
+    (the flag is gone) and we simply continue: as a resume, so finished nodes and
+    units are skipped and nothing is re-billed.
+    """
+    job_id = init["job_id"]
+    for _ in range(20):  # bounded: a withdraw/re-pause tug-of-war can't spin forever
+        try:
+            return await _invoke(graph, init, config, resume, checkpointed=checkpointed), None
+        except JobPaused as paused:
+            if settle_pause is not None:
+                await settle_pause()
+            forget(job_id)  # in-flight units have drained; signals are re-created on demand
+            async with get_sessionmaker()() as session:
+                if await repo.park_job(session, job_id):
+                    return {}, paused
+                await repo.upsert_run(session, job_id, status="running")  # back from "paused"
+            clear_pause(job_id)
+            if control is not None:
+                control.reset()  # else its cached "paused" answer re-pauses every retry
+            log.info("job %s: pause withdrawn while draining; continuing from %s", job_id, paused.stage)
+            resume = True
+    raise RuntimeError("pause/resume toggled too many times in one run; resume it again")
 
 
 async def _invoke(graph, init: dict, config: dict, resume: bool, *, checkpointed: bool) -> dict:

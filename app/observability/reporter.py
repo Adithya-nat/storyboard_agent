@@ -50,6 +50,11 @@ class ProgressReporter:
                 s, job_id, name, "failed", message=f"{type(exc).__name__}: {exc}"
             )
 
+    async def stage_pause(self, job_id: str, name: str, seq: int, message: str) -> None:
+        """The stage stopped for a pause (mid-stage, or before it started)."""
+        async with self._sm() as s:
+            await repo.pause_stage(s, job_id, name, seq, message)
+
     async def record_stage_tokens(self, job_id: str, name: str) -> None:
         """Persist this stage's tokens + spend live at stage end (best-effort)."""
         from app.observability.usage import get_collector

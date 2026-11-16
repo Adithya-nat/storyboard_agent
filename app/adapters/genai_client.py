@@ -17,6 +17,9 @@ def make_client(settings: Settings, *, timeout_seconds: float | None = None, att
     from google import genai  # lazy: mock mode needs no SDK import
     from google.genai import types
 
+    if settings.mock_mode:  # a mock run must never reach a paid API, even with a key in .env
+        raise RuntimeError("mock mode: real Gemini calls are disabled")
+
     kwargs: dict = {"api_key": settings.gemini_api_key}
     opts: dict = {}
     if timeout_seconds:

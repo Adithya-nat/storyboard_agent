@@ -13,6 +13,7 @@ Generation runs in the background (minutes). A client can either POLL (GET statu
 from __future__ import annotations
 
 import asyncio
+import weakref
 import json
 import mimetypes
 import os
@@ -27,6 +28,8 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.adapters.turnstile import verify_turnstile
+from app.core.auth import User, allowed_user, media_user
+from app.core.keys import looks_like_key
 from app.artifacts.rows import assets_version
 from app.core.images import raqm_available
 from app.observability.budget import budget_status, estimate
@@ -39,6 +42,7 @@ from app.schemas import (
     VideoGap,
     ArtifactRef,
     JobCreatedResponse,
+    JobListItem,
     JobStatus,
     JobStatusResponse,
     LogLine,
@@ -54,6 +58,7 @@ from app.schemas import (
     BriefView,
     FilmReviewView,
 )
+from app.workers.control import clear_pause
 from app.workers.runner import run_job
 
 router = APIRouter(prefix="/storyboard", tags=["storyboard"])
@@ -62,8 +67,13 @@ router = APIRouter(prefix="/storyboard", tags=["storyboard"])
 # app/main.py). Disabled in tests via settings.rate_limit_enabled so the shared
 # in-memory counter can't bleed across test cases.
 _settings = get_settings()
+def _rate_key(request: Request) -> str:
+    # Signed-in users are limited per account; local mode per IP.
+    return getattr(request.state, "user_id", None) or get_remote_address(request)
+
+
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=_rate_key,
     enabled=_settings.rate_limit_enabled and bool(_settings.rate_limit_create.strip()),
 )
 _CREATE_RATE_LIMIT = _settings.rate_limit_create.strip() or "100/minute"
@@ -99,11 +109,17 @@ def _current_stage(stages) -> str | None:
 
 
 def _expires_at(job) -> datetime:
-    """When a job (and its artifacts) expire = created_at + the TTL."""
-    created = job.created_at
+    """When a job (and its artifacts) expire = created_at + the TTL. Paused films follow
+    the same rule unless ``paused_ttl_seconds`` is set (self-hosted), which counts from
+    the moment the film paused."""
+    settings = get_settings()
+    created, ttl = job.created_at, settings.job_ttl_seconds
+    if (job.status == JobStatus.PAUSED.value and job.updated_at is not None
+            and settings.paused_ttl_seconds is not None):
+        created, ttl = job.updated_at, settings.paused_ttl_seconds
     if created.tzinfo is None:  # SQLite can hand back a naive datetime
         created = created.replace(tzinfo=timezone.utc)
-    return created + timedelta(seconds=get_settings().job_ttl_seconds)
+    return created + timedelta(seconds=ttl)
 
 
 async def _load_live_job(session: AsyncSession, job_id: str):
@@ -116,9 +132,53 @@ async def _load_live_job(session: AsyncSession, job_id: str):
         raise HTTPException(status_code=404, detail="job not found")
     if datetime.now(timezone.utc) >= _expires_at(job):
         raise HTTPException(
-            status_code=410, detail="job expired (jobs are kept for 1 hour)"
+            status_code=410, detail="job expired (everything is deleted 24 hours after creation)"
         )
     return job
+
+
+async def _load_owned_job(session: AsyncSession, job_id: str, user: User):
+    """A live job the caller owns; someone else's job is a plain 404."""
+    job = await _load_live_job(session, job_id)
+    if user.scope is not None and job.user_id != user.scope:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+# Films run in this one process, so one lock makes "check the limits, then admit" atomic.
+_admission_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _admission() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _admission_locks.get(loop)
+    if lock is None:
+        lock = _admission_locks[loop] = asyncio.Lock()
+    return lock
+
+
+async def _check_active_limits(session: AsyncSession, user: User) -> None:
+    settings = get_settings()
+    if not settings.hosted:
+        return
+    if await repo.count_active_jobs(session, user.scope) >= settings.max_active_jobs_per_user:
+        raise HTTPException(status_code=429, detail="You already have a film rendering. Wait for it to finish.")
+    if await repo.count_active_jobs(session) >= settings.max_active_jobs:
+        raise HTTPException(status_code=429, detail="The studio is busy right now. Try again in a few minutes.")
+
+
+def _request_key(request: Request) -> str | None:
+    """The tester's Gemini key from X-Gemini-Key (BYOK). Held in memory for the run only."""
+    settings = get_settings()
+    key = (request.headers.get("x-gemini-key") or "").strip()
+    if key and not looks_like_key(key):
+        raise HTTPException(status_code=400, detail="That doesn't look like a Gemini API key.")
+    if not key and settings.key_mode == "byok" and not settings.use_mock_providers:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "key_required", "message": "Add your Gemini API key to make films."},
+        )
+    return key or None
 
 
 def _artifact_url(job_id: str, artifact_id: str) -> str:
@@ -141,6 +201,7 @@ async def create_storyboard(
     body: StoryboardRequest,
     background: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(allowed_user),
 ) -> JobCreatedResponse:
     # Guard the public, un-authed endpoint against quota-draining abuse: a per-IP
     # rate limit (the decorator) + a Cloudflare Turnstile check (both no-ops when
@@ -150,6 +211,14 @@ async def create_storyboard(
     ):
         raise HTTPException(status_code=403, detail="Turnstile verification failed")
     settings = get_settings()
+    api_key = _request_key(request)
+    async with _admission():
+        return await _admit_new(session, background, body, user, api_key)
+
+
+async def _admit_new(session, background, body, user: User, api_key: str | None) -> JobCreatedResponse:
+    settings = get_settings()
+    await _check_active_limits(session, user)
     style = body.style or settings.default_style
     language = body.language or settings.default_language
     if language == "ta" and settings.require_raqm_for_tamil and not raqm_available():
@@ -158,14 +227,15 @@ async def create_storyboard(
             detail="Tamil captions need libraqm for correct text shaping (brew install libraqm). See SETUP.md.",
         )
     omni = True
-    status = await budget_status(session, settings)
+    status = await budget_status(session, settings, user.scope)
     cost = await estimate(session, style=style, duration=body.duration)
-    if status.month_spent_usd + cost > settings.monthly_budget_usd:
+    cap = settings.budget_cap_usd
+    if status.month_spent_usd + cost > cap:
         cheaper = await estimate(session, style=style, duration=body.duration, omni=False)
         if (
             settings.budget_mode == "degrade"
             and not settings.require_ai_video
-            and status.month_spent_usd + cheaper <= settings.monthly_budget_usd
+            and status.month_spent_usd + cheaper <= cap
         ):
             omni = False
         else:
@@ -173,21 +243,41 @@ async def create_storyboard(
                 status_code=402,
                 detail=(
                     f"Monthly AI budget reached: ${status.month_spent_usd:.2f} of "
-                    f"${settings.monthly_budget_usd:.0f} spent; this video needs ~${cost:.2f}. "
-                    "Raise MONTHLY_BUDGET_USD or wait for next month."
+                    f"${cap:.0f} spent; this video needs ~${cost:.2f}. "
+                    + ("Your monthly cap resets on the 1st." if settings.hosted
+                       else "Raise MONTHLY_BUDGET_USD or wait for next month.")
                 ),
             )
-    job = await repo.create_job(session, body.prompt, body.duration, style, language)
-    background.add_task(run_job, job.id, body.prompt, body.duration, False, style, language, omni)
+    job = await repo.create_job(session, body.prompt, body.duration, style, language, user_id=user.scope)
+    background.add_task(run_job, job.id, body.prompt, body.duration, False, style, language, omni,
+                        api_key=api_key, user_id=user.scope)
     return JobCreatedResponse(job_id=job.id, status=JobStatus(job.status))
+
+
+@router.get("", response_model=list[JobListItem])
+async def list_storyboards(
+    session: AsyncSession = Depends(get_session), user: User = Depends(allowed_user)
+) -> list[JobListItem]:
+    """The caller's films from the last 24 hours (newest first)."""
+    since = datetime.now(timezone.utc) - timedelta(seconds=get_settings().job_ttl_seconds)
+    return [
+        JobListItem(
+            job_id=j.id, status=JobStatus(j.status), prompt=j.prompt, duration=j.duration,
+            style=j.style, language=j.language, cost_usd=round(j.cost_usd or 0.0, 4),
+            created_at=j.created_at, expires_at=_expires_at(j),
+        )
+        for j in await repo.list_jobs(session, user.scope, since)
+    ]
 
 
 @router.post("/{job_id}/resume", status_code=202, response_model=JobCreatedResponse)
 async def resume_storyboard(
     job_id: str,
+    request: Request,
     background: BackgroundTasks,
     body: ResumeRequest | None = None,
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(allowed_user),
 ) -> JobCreatedResponse:
     """Resume an interrupted/failed job. Idempotent nodes skip work already done.
 
@@ -195,9 +285,18 @@ async def resume_storyboard(
     NOTE: this status check is UX only — the real concurrency guard is the atomic
     ``try_acquire_job`` inside ``run_job``, so two racing resumes can't both run.
     """
-    job = await _load_live_job(session, job_id)
+    job = await _load_owned_job(session, job_id, user)
 
     status = JobStatus(job.status)
+    if status == JobStatus.PAUSING:
+        # Still draining in-flight units: withdraw the pause; the same runner (and the
+        # key it already holds) carries on, so no key is needed here.
+        if await repo.withdraw_pause(session, job_id):
+            clear_pause(job_id)
+            return JobCreatedResponse(job_id=job.id, status=JobStatus.RUNNING)
+        job = await _load_owned_job(session, job_id, user)  # it parked in the meantime
+        status = JobStatus(job.status)
+    api_key = _request_key(request)  # a new run starts below: BYOK needs the key again
     if status == JobStatus.RUNNING:
         raise HTTPException(status_code=409, detail="job is already running")
     if status in (JobStatus.COMPLETED, JobStatus.COMPLETED_WITH_WARNINGS):
@@ -207,8 +306,12 @@ async def resume_storyboard(
         )
 
     allow_stills = bool(body and body.allow_stills)
+    async with _admission():
+        await _check_active_limits(session, user)
+        if not await repo.mark_queued(session, job.id):
+            raise HTTPException(status_code=409, detail="job is already running")
     background.add_task(run_job, job.id, job.prompt, job.duration, True, job.style, job.language,
-                        allow_stills=allow_stills)
+                        allow_stills=allow_stills, api_key=api_key, user_id=job.user_id)
     return JobCreatedResponse(job_id=job.id, status=JobStatus.RUNNING)
 
 
@@ -232,9 +335,10 @@ def _video_gap(job) -> VideoGap | None:
 
 @router.get("/{job_id}", response_model=JobStatusResponse)
 async def get_storyboard(
-    job_id: str, session: AsyncSession = Depends(get_session)
+    job_id: str, session: AsyncSession = Depends(get_session),
+    user: User = Depends(allowed_user),
 ) -> JobStatusResponse:
-    job = await _load_live_job(session, job_id)
+    job = await _load_owned_job(session, job_id, user)
     stages = await repo.get_stages(session, job_id)
     return JobStatusResponse(
         job_id=job.id,
@@ -255,6 +359,8 @@ async def get_storyboard(
         pipeline=pipeline_stage_names(get_settings()),
         stages=[_stage_ref(st) for st in stages],
         video_gap=_video_gap(job),
+        pause_requested=job.pause_requested_at is not None,
+        breakpoints=list(job.breakpoints or []),
         artifacts=[
             ArtifactRef(
                 id=a.id,
@@ -275,13 +381,14 @@ async def list_logs(
     stage: str | None = None,
     limit: int = 500,
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(allowed_user),
 ) -> LogsResponse:
     """Paginated log pull — the expand-view + a curl-friendly replay of the stream.
 
     ``after`` is the cursor (the last id you've seen; 0 = from the start);
     ``stage`` filters to one stage; poll by passing back ``next_after``.
     """
-    await _load_live_job(session, job_id)
+    await _load_owned_job(session, job_id, user)
     limit = max(1, min(limit, 2000))
     logs = await repo.get_logs(session, job_id, after_id=after, stage=stage, limit=limit)
     next_after = logs[-1].id if logs else after
@@ -291,7 +398,7 @@ async def list_logs(
 
 
 @router.get("/{job_id}/events")
-async def stream_events(job_id: str, request: Request) -> EventSourceResponse:
+async def stream_events(job_id: str, request: Request, user: User = Depends(media_user)) -> EventSourceResponse:
     """Server-Sent Events: live status + stage + log stream for one job.
 
     On connect: emits a status+stage snapshot, then REPLAYS logs since
@@ -311,7 +418,7 @@ async def stream_events(job_id: str, request: Request) -> EventSourceResponse:
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as s:  # existence + expiry check before streaming
-        await _load_live_job(s, job_id)
+        await _load_owned_job(s, job_id, user)
 
     poll = max(0.01, settings.log_poll_interval_seconds)
     batch = settings.log_drain_batch
@@ -386,9 +493,9 @@ async def stream_events(job_id: str, request: Request) -> EventSourceResponse:
 
 @router.get("/{job_id}/video")
 async def get_video(
-    job_id: str, session: AsyncSession = Depends(get_session)
+    job_id: str, session: AsyncSession = Depends(get_session), user: User = Depends(media_user)
 ) -> FileResponse:
-    job = await _load_live_job(session, job_id)
+    job = await _load_owned_job(session, job_id, user)
 
     video = next((a for a in job.artifacts if a.kind == "video"), None)
     if video is None:
@@ -405,13 +512,14 @@ async def get_video(
 
 @router.get("/{job_id}/artifacts/{artifact_id}")
 async def get_artifact(
-    job_id: str, artifact_id: str, session: AsyncSession = Depends(get_session)
+    job_id: str, artifact_id: str, session: AsyncSession = Depends(get_session),
+    user: User = Depends(media_user),
 ) -> FileResponse:
     """Stream one artifact's bytes (frame / style_ref / script / ...).
 
     The browser-safe way to fetch images: the raw filesystem path is never exposed
     to clients, only this opaque id-addressed URL."""
-    job = await _load_live_job(session, job_id)
+    job = await _load_owned_job(session, job_id, user)
     art = next((a for a in job.artifacts if a.id == artifact_id), None)
     if art is None:
         raise HTTPException(status_code=404, detail="artifact not found")
@@ -420,10 +528,11 @@ async def get_artifact(
 
 @router.get("/{job_id}/frames/{order}")
 async def get_frame(
-    job_id: str, order: int, session: AsyncSession = Depends(get_session)
+    job_id: str, order: int, session: AsyncSession = Depends(get_session),
+    user: User = Depends(media_user),
 ) -> FileResponse:
     """Convenience: stream the frame at a given order (1..N)."""
-    job = await _load_live_job(session, job_id)
+    job = await _load_owned_job(session, job_id, user)
     art = next(
         (a for a in job.artifacts if a.kind == "frame" and a.order_index == order),
         None,
@@ -435,7 +544,7 @@ async def get_frame(
 
 @router.get("/{job_id}/storyboard", response_model=StoryboardContent)
 async def get_storyboard_content(
-    job_id: str, session: AsyncSession = Depends(get_session)
+    job_id: str, session: AsyncSession = Depends(get_session), user: User = Depends(allowed_user)
 ) -> StoryboardContent:
     """The assembled storyboard for the result page: the video + per-scene frames
     with the EXACT captions the assembler burned into the mp4.
@@ -444,7 +553,7 @@ async def get_storyboard_content(
     each frame's caption), falling back to the script's scene narration. The
     title / logline / style come from the script.
     """
-    job = await _load_live_job(session, job_id)
+    job = await _load_owned_job(session, job_id, user)
     by_kind = {a.kind: a for a in job.artifacts}
 
     def _read_json(art) -> dict:
@@ -566,7 +675,7 @@ async def get_storyboard_content(
         )
         for c in script.get("characters", [])
     ]
-    return StoryboardContent(
+    content = StoryboardContent(
         job_id=job_id,
         status=JobStatus(job.status),
         title=script.get("title", ""),
@@ -598,12 +707,28 @@ async def get_storyboard_content(
         },
         scenes=scenes,
     )
+    return _with_english(content, _job_json("gloss.json"))
+
+
+def _with_english(content: StoryboardContent, gloss: dict) -> StoryboardContent:
+    """Attach the English rendering of each Tamil string (from gloss.json) for the UI."""
+    if not gloss:
+        return content
+    en = gloss.get
+    content.title_en, content.logline_en = en(content.title), en(content.logline)
+    for sc in content.scenes:
+        sc.narration_en = en(sc.narration)
+        for line in [*sc.lines, *(ln for sh in sc.shots for ln in sh.lines)]:
+            line.text_en = en(line.text)
+    return content
 
 
 @router.get("/{job_id}/publish", response_model=PublishKit)
-async def get_publish_kit(job_id: str, session: AsyncSession = Depends(get_session)) -> PublishKit:
+async def get_publish_kit(
+    job_id: str, session: AsyncSession = Depends(get_session), user: User = Depends(allowed_user)
+) -> PublishKit:
     """Post-ready copy (title, hook, per-platform captions + hashtags)."""
-    job = await _load_live_job(session, job_id)
+    job = await _load_owned_job(session, job_id, user)
     art = next((a for a in job.artifacts if a.kind == "publish"), None)
     if art is None or not os.path.exists(art.path):
         raise HTTPException(status_code=404 if repo.is_terminal(job.status) else 409, detail="publish kit not ready")

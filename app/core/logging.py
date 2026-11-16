@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import sys
 
+from app.core.keys import RedactKeysFilter
+
 _CONFIGURED = False
 
 
@@ -16,6 +18,7 @@ def configure_logging(level: int = logging.INFO) -> None:
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)-7s %(name)s :: %(message)s")
     )
+    handler.addFilter(RedactKeysFilter())
     root = logging.getLogger()
     root.setLevel(level)
     root.addHandler(handler)

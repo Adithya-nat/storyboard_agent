@@ -1,0 +1,15 @@
+.venv
+.git
+.env
+.env.*
+!.env.example
+artifacts_store
+evals/output
+tests
+site
+deploy
+**/__pycache__
+*.wav
+*.txt
+.coverage
+.pytest_cache
