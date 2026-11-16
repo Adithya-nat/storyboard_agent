@@ -62,7 +62,7 @@ async def test_resume_skips_done_work_and_regenerates_missing(stub_video, artifa
 
     # Simulate an interrupted job: drop the video + a few frames, mark interrupted.
     (job_dir / "storyboard.mp4").unlink()
-    for n in (5, 6, 7):
+    for n in (2, 3):
         (job_dir / f"frame_{n:02d}.png").unlink()
     async with get_sessionmaker()() as s:
         await repo.set_status(s, job.id, JobStatus.INTERRUPTED)
@@ -79,11 +79,11 @@ async def test_resume_skips_done_work_and_regenerates_missing(stub_video, artifa
     # A surviving frame was reused, not rewritten.
     assert kept_frame.stat().st_mtime_ns == kept_mtime
     # Deleted frames regenerated; full set present again; video rebuilt.
-    assert len(list(job_dir.glob("frame_*.png"))) == 15
+    assert len(list(job_dir.glob("frame_*.png"))) == 4
     assert (job_dir / "storyboard.mp4").exists()
     # Re-persist REPLACED rather than appended -> no duplicate artifact rows.
     counts = Counter(a.kind for a in done.artifacts)
-    assert counts["frame"] == 15
+    assert counts["frame"] == 4
     assert counts["script"] == 1
     assert counts["video"] == 1
 
@@ -140,9 +140,9 @@ async def test_resume_continues_from_crash_checkpoint(stub_video, artifact_root,
     assert done.status == JobStatus.COMPLETED.value
     assert calls["n"] == 2  # image_gen ran exactly once more (the continuation)
     assert (job_dir / "shotlist.json").stat().st_mtime_ns == shotlist_mtime  # not re-run
-    assert len(list(job_dir.glob("frame_*.png"))) == 15
+    assert len(list(job_dir.glob("frame_*.png"))) == 4
     counts = Counter(a.kind for a in done.artifacts)
-    assert counts["frame"] == 15
+    assert counts["frame"] == 4
     assert counts["video"] == 1
 
 
@@ -203,7 +203,7 @@ async def test_run_job_survives_unavailable_checkpointer(stub_video, monkeypatch
     async with get_sessionmaker()() as s:
         done = await repo.get_job(s, job.id)
     assert done.status == JobStatus.COMPLETED.value
-    assert sum(1 for a in done.artifacts if a.kind == "frame") == 15
+    assert sum(1 for a in done.artifacts if a.kind == "frame") == 4
 
 
 async def test_resume_endpoint_status_codes(client, monkeypatch):

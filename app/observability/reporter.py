@@ -20,9 +20,13 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.artifacts.rows import artifact_rows
+from app.core.logging import get_logger
 from app.db import repository as repo
 from app.observability.context import current
 from app.observability.logs import LogItem, enqueue
+
+log = get_logger(__name__)
 
 
 class ProgressReporter:
@@ -64,7 +68,32 @@ class ProgressReporter:
         except Exception:  # noqa: BLE001 - accounting never breaks a stage
             pass
 
+    async def publish_artifacts(self, job_id: str, state: dict) -> None:
+        """Make everything the run has produced so far fetchable mid-run (the
+        live generation UI shows real frames, cast and audio as they land).
+        Same rows as the final persist, so it's a no-op for the end result.
+        Best-effort: a failed publish never breaks the stage."""
+        try:
+            rows = artifact_rows(state)
+            if not rows:
+                return
+            async with self._sm() as s:
+                await repo.replace_artifacts(s, job_id, rows)
+        except Exception:  # noqa: BLE001 - presentation only, never fatal
+            log.warning("live artifact publish failed for job %s", job_id, exc_info=True)
+
     # --- intra-stage updates (called by nodes, via the contextvar) --------- #
+    async def publish_frame(self, order: int, path: str) -> None:
+        """Publish one finished frame immediately (best-effort)."""
+        ctx = current()
+        if ctx is None:
+            return
+        try:
+            async with self._sm() as s:
+                await repo.upsert_artifact(s, ctx.job_id, kind="frame", path=path, order_index=order)
+        except Exception:  # noqa: BLE001 - presentation only, never fatal
+            log.warning("live frame publish failed for job %s", ctx.job_id, exc_info=True)
+
     async def progress(self, current_n: int, total: int, message: str | None = None) -> None:
         ctx = current()
         if ctx is None:

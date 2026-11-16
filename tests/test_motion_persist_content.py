@@ -11,7 +11,7 @@ from app.db.session import get_sessionmaker
 from app.main import app
 from app.workers.runner import _persist
 
-_BASE_PIPELINE = ["script_writer", "reflection", "designer", "image_gen", "narration", "captions", "music", "assembler", "publish_kit"]
+_BASE_PIPELINE = ["brief", "script_writer", "dialogue_pass", "reflection", "designer", "image_gen", "narration", "captions", "music", "assembler", "film_review", "publish_kit"]
 
 
 @pytest.fixture
@@ -102,7 +102,7 @@ async def test_pipeline_field_includes_motion_when_enabled(client, monkeypatch):
     try:
         job_id = await _make_job()
         body = (await client.get(f"/storyboard/{job_id}")).json()
-        assert body["pipeline"] == _BASE_PIPELINE[:5] + ["motion"] + _BASE_PIPELINE[5:]
+        assert body["pipeline"] == _BASE_PIPELINE[:7] + ["motion"] + _BASE_PIPELINE[7:]
     finally:
         get_settings.cache_clear()
 

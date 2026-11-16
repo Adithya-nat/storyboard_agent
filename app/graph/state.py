@@ -21,6 +21,7 @@ functools.partial in graph/build.py, NOT carried in state.
 from __future__ import annotations
 
 import operator
+import math
 from dataclasses import dataclass
 from typing import Annotated, TypedDict
 
@@ -56,6 +57,8 @@ class MotionClipMeta(TypedDict, total=False):
     attempts: list[dict]
     motion_reason: str | None
     has_audio: bool  # the clip carries generated audio (Omni)
+    qc: list[str]    # continuity issues left in the delivered clip (empty = passed)
+    renders: int
 
 
 class SceneAudioMeta(TypedDict, total=False):
@@ -75,6 +78,7 @@ class StoryboardState(TypedDict, total=False):
     duration: int
     style: str     # narrated | dialogue | mixed
     language: str  # en | ta
+    brief_path: str | None  # creative brief (format, hook, speech register, scene plan)
     script_path: str | None
     # Reflection output (Workstream 3): the critique/revise report. The chosen script is
     # written back over script.json in place, so script_path is unchanged.
@@ -93,9 +97,11 @@ class StoryboardState(TypedDict, total=False):
     # finalizes dialogue scenes after motion). Keyed by order.
     scene_audio: list[SceneAudioMeta]
     cast_paths: dict[str, list[str]]  # character name -> reference sheet paths
+    location_paths: dict[str, str]  # location tag -> set reference plate
     music_path: str | None
     scene_audio_path: str | None
     publish_path: str | None
+    film_review_path: str | None  # final-film coherence review
     cover_path: str | None
     video_path: str | None
     narration_path: str | None  # narration track muxed under the video (None = silent)
@@ -114,18 +120,23 @@ def frames_for_duration(duration: int, seconds_per_frame: float) -> int:
     return max(1, round(duration / seconds_per_frame))
 
 
-# Dialogue beats run longer than narration beats (people need time to say their lines),
-# so the same runtime holds fewer scenes. Multipliers on seconds_per_frame per style.
-_STYLE_SCENE_SECONDS = {"narrated": 1.0, "mixed": 1.25, "dialogue": 1.5}
+# A scene is one continuous place/time filmed as a multi-shot take (one Omni clip, <=15s).
+SCENE_MIN_SECONDS, SCENE_MAX_SECONDS = 5.0, 15.0
+_STYLE_SCENE_SECONDS = {"narrated": 8.0, "mixed": 10.0, "dialogue": 11.0}
 
 
-def scenes_for_duration(duration: int, seconds_per_frame: float, style: str = "narrated") -> int:
-    """Scene count for a style: narrated = 1 per seconds_per_frame (4s -> 60s = 15);
-    mixed = 1 per 1.25x (60s = 12); dialogue = 1 per 1.5x (60s = 10). At least 2 for a
-    dialogue/mixed film so there's a conversation, never zero."""
-    per = seconds_per_frame * _STYLE_SCENE_SECONDS.get(style, 1.0)
-    n = frames_for_duration(duration, per)
-    return max(2, n) if style in ("dialogue", "mixed") else n
+def scene_range(duration: int) -> tuple[int, int]:
+    """Allowed scene counts for a runtime: every scene between 5 and 15 seconds."""
+    lo = max(1, math.ceil(duration / SCENE_MAX_SECONDS))
+    return lo, max(lo, math.floor(duration / SCENE_MIN_SECONDS))
+
+
+def scenes_for_duration(duration: int, style: str = "narrated") -> int:
+    """Default scene count (30s dialogue -> 3, 60s dialogue -> 5, 60s narrated -> 8)."""
+    lo, hi = scene_range(duration)
+    n = round(duration / _STYLE_SCENE_SECONDS.get(style, 8.0))
+    n = min(hi, max(lo, n))
+    return max(2, n) if style in ("dialogue", "mixed") and hi >= 2 else n
 
 
 @dataclass
@@ -160,4 +171,4 @@ class Deps:
     def frame_count(self, duration: int, style: str = "narrated") -> int:
         if self.max_frames is not None:
             return self.max_frames
-        return scenes_for_duration(duration, self.settings.seconds_per_frame, style)
+        return scenes_for_duration(duration, style)

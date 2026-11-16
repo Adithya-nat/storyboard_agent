@@ -137,6 +137,7 @@ class Settings(BaseSettings):
     # ON: per-frame slow zoom (ffmpeg zoompan) + crossfades + caption overlay, so
     enable_motion: bool = True
     crossfade_seconds: float = 0.4
+    editor_hard_cuts: bool = True  # cut between scenes; dissolve only where the script marks a time jump
 
     # --- Captions ---
     # Optional path to a .ttf for nicer subtitles. When unset we use Pillow's
@@ -208,6 +209,9 @@ class Settings(BaseSettings):
     omni_max_concurrency: int = 4
     omni_timeout_seconds: float = 600.0
     omni_speaker_check: bool = True      # re-render a dialogue clip once if a voice is wrong
+    film_review_enabled: bool = True     # a model watches the finished film and scores coherence
+    film_review_model: str = "gemini-4-argon"
+    omni_scene_qc: bool = True           # watch each clip vs its shot plan; re-render once on a failure
     omni_speaker_check_model: str = "gemini-3.8-flash"
 
     # --- Motion engine (external service: per-scene "live photo" motion clips) ---

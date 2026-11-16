@@ -25,22 +25,24 @@ from __future__ import annotations
 import asyncio
 
 from app.adapters.errors import ProviderError
+from app.agents.brief import speech_block
 from app.agents.judge import NarrativeJudge
+from app.agents.script_writer import load_brief, normalize_script
 from app.core.logging import get_logger
 from app.graph.state import Deps, StoryboardState
 from app.prompts import render
-from app.schemas import JudgeReport, Script
+from app.schemas import CreativeBrief, JudgeReport, Script
 
 log = get_logger(__name__)
 
-def _revise(deps: Deps, script: Script, report: JudgeReport) -> Script:
-    """One revision pass: rewrite the script to address the judge's guidance.
-
-    Mock mode returns the script unchanged (deterministic offline loop)."""
-    return deps.llm.complete_json(
-        system=render("reflection/reviser_system") + "\n\n" + render("reflection/reviser_style_rules"),
+def _revise(deps: Deps, script: Script, report: JudgeReport, brief: CreativeBrief) -> Script:
+    """One revision pass addressing the judge's guidance (mock: unchanged)."""
+    revised = deps.llm.complete_json(
+        system=render("reflection/reviser_system") + "\n\n"
+        + render("reflection/reviser_style_rules", register_block=speech_block(brief, script.language)),
         user=render(
             "reflection/reviser_user",
+            brief_json=brief.model_dump_json(indent=2),
             guidance=report.revision_guidance or report.rationale,
             weakest=report.weakest_dimension,
             weak_beats=report.weak_beats,
@@ -48,8 +50,12 @@ def _revise(deps: Deps, script: Script, report: JudgeReport) -> Script:
         ),
         response_model=Script,
         role="script",
-        mock_factory=lambda _u: script,
+        mock_factory=lambda _u: script.model_copy(deep=True),
     )
+    if len(revised.scenes) != len(script.scenes):
+        return revised  # rejected by the caller
+    return normalize_script(revised, style=script.story_style, language=script.language,
+                            n=len(script.scenes), brief=brief)
 
 
 async def reflection(state: StoryboardState, deps: Deps) -> StoryboardState:
@@ -66,23 +72,26 @@ async def reflection(state: StoryboardState, deps: Deps) -> StoryboardState:
         return {"reflection_path": store.abspath("reflection.json")}
 
     script = Script.model_validate(store.load_json(state["script_path"]))
+    brief = load_brief(state, deps, script.story_style, len(script.scenes))
     judge = NarrativeJudge(deps.llm, settings)
     warnings: list[str] = []
 
     # Initial score. If we can't even judge, proceed with the script untouched.
     try:
-        best_report = await asyncio.to_thread(judge.score, script)
+        best_report = await asyncio.to_thread(judge.score, script, None, brief)
     except ProviderError as exc:
         log.warning("reflection: initial judge failed (%s); skipping reflection", exc)
         return {"warnings": [f"reflection: judge unavailable ({exc}); script left as-is"]}
 
     log.info(
-        "judge scored the story %d/100 — structure %d, continuity %d, clarity %d, "
-        "payoff %d, visual %d (threshold %d)",
-        best_report.overall, best_report.structure, best_report.continuity,
-        best_report.clarity, best_report.payoff, best_report.visual_concreteness,
+        "judge scored the story %d/100 — hook %d, brief %d, structure %d, continuity %d, clarity %d, "
+        "payoff %d, visual %d, dialogue %d, thread %d, register %d (threshold %d)",
+        best_report.overall, best_report.hook, best_report.brief_adherence, best_report.structure,
+        best_report.continuity, best_report.clarity, best_report.payoff, best_report.visual_concreteness,
+        best_report.dialogue, best_report.dialogue_thread, best_report.register_fit,
         settings.reflection_threshold,
     )
+    log.info("table read: %s", best_report.retelling[:300])
 
     best_script = script
     iters = 0
@@ -97,7 +106,7 @@ async def reflection(state: StoryboardState, deps: Deps) -> StoryboardState:
             settings.reflection_max_iters, best_report.weakest_dimension,
         )
         try:
-            revised = await asyncio.to_thread(_revise, deps, best_script, best_report)
+            revised = await asyncio.to_thread(_revise, deps, best_script, best_report, brief)
             # Guard the downstream invariant: frame/scene count must not drift.
             if len(revised.scenes) != len(best_script.scenes):
                 log.warning(
@@ -106,7 +115,7 @@ async def reflection(state: StoryboardState, deps: Deps) -> StoryboardState:
                 )
                 warnings.append("reflection: a revision changed the scene count; kept prior version")
                 continue
-            new_report = await asyncio.to_thread(judge.score, revised)
+            new_report = await asyncio.to_thread(judge.score, revised, None, brief)
         except ProviderError as exc:
             log.warning("reflection: revise/judge failed on iter %d (%s); keeping best", iters, exc)
             warnings.append(f"reflection: revision step failed ({exc}); kept best-so-far")

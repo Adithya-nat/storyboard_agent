@@ -59,7 +59,7 @@ def test_system_prompt_builds_and_mentions_structure():
     carries the narrative scaffold."""
     prompt = _system_prompt(15)
     assert "15" in prompt
-    for token in ("BEGINNING", "MIDDLE", "END", "arc", "beat_role", "DON'T"):
+    for token in ("SCENE", "shots", "hook", "arc", "beat_role", "exit_hook", "DON'T", "speech_register"):
         assert token in prompt
     # No stray unescaped format fields left behind.
     assert "{" not in prompt and "}" not in prompt

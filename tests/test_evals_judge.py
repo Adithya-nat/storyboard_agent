@@ -41,10 +41,12 @@ def test_judge_report_schema_parses_and_defaults():
 
 def test_compute_overall_is_weighted_mean():
     r = JudgeReport(structure=100, continuity=0, clarity=0, visual_concreteness=0, payoff=0)
-    # only the structure weight (0.30) contributes
+    # only the structure weight contributes
     assert compute_overall(r) == round(100 * DIMENSION_WEIGHTS["structure"])
-    flat = JudgeReport(structure=80, continuity=80, clarity=80, visual_concreteness=80, payoff=80)
+    flat = JudgeReport(**{d: 80 for d in DIMENSION_WEIGHTS})
     assert compute_overall(flat) == 80
+    spoken = JudgeReport(**{d: 80 for d in DIMENSION_WEIGHTS}, dialogue=80, dialogue_thread=20, register_fit=80)
+    assert compute_overall(spoken, has_dialogue=True) < 80  # random, disconnected lines pull it down
 
 
 def test_narrative_judge_mock_returns_report():
@@ -70,7 +72,7 @@ class _StubLLM:
 
 def test_overall_is_canonical_not_model_supplied():
     lying = JudgeReport(
-        structure=10, continuity=10, clarity=10, visual_concreteness=10, payoff=10,
+        **{d: 10 for d in DIMENSION_WEIGHTS}, register_fit=10,
         overall=999,  # the model lies; the judge must overwrite this
         weakest_dimension="continuity",
         revision_guidance="fix beat 2",
@@ -107,3 +109,16 @@ def test_rubric_fixtures_are_well_formed():
     assert GOOD_SCRIPT.arc and all(s.beat_role for s in GOOD_SCRIPT.scenes)
     assert BAD_SCRIPT.arc == "" and all(s.beat_role == "" for s in BAD_SCRIPT.scenes)
     assert len(GOOD_SCRIPT.scenes) == len(BAD_SCRIPT.scenes)
+
+
+def test_judge_sees_dialogue_in_flat_and_shot_scripts():
+    from app.agents.judge import _format_target
+    from app.schemas import DialogueLine, SceneShot
+
+    flat = Script(title="t", logline="l", scenes=[Scene(order=1, description="d", mode="dialogue",
+                                                        lines=[DialogueLine(speaker="A", text="flat line")])])
+    assert "flat line" in _format_target(flat, None)
+    shot = Script(title="t", logline="l", scenes=[Scene(order=1, description="d", mode="dialogue",
+                  shots=[SceneShot(action="a", lines=[DialogueLine(speaker="A", text="shot line")])],
+                  lines=[DialogueLine(speaker="A", text="shot line")])])
+    assert _format_target(shot, None).count("shot line") == 1

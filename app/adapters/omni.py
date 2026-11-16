@@ -70,6 +70,15 @@ def block_code(exc: BaseException) -> str | None:
     return "content_blocked" if "third-party" in low else "prohibited_content"
 
 
+@dataclass(frozen=True)
+class ShotSpec:
+    size: str
+    action: str
+    camera: str = ""
+    seconds: float = 3.0
+    lines: tuple[tuple[str, str, str], ...] = ()  # (speaker, text, delivery)
+
+
 @dataclass
 class SceneSpec:
     order: int
@@ -81,6 +90,8 @@ class SceneSpec:
     lines: tuple[tuple[str, str, str], ...] = ()  # (speaker, text, delivery)
     voices: dict | None = None      # speaker -> voice description
     seconds: float = 4.0
+    shots: tuple[ShotSpec, ...] = ()  # >1 => one multi-shot take with cuts
+    setting: str = ""               # location look + time of day
 
 
 @dataclass
@@ -90,6 +101,7 @@ class OmniClip:
     seconds: int
     cost_usd: float
     renders: int
+    qc: tuple[str, ...] = ()  # continuity issues left in the delivered clip
 
 
 def _gender(voice: str) -> str | None:
@@ -117,12 +129,43 @@ def timed_lines(spec: SceneSpec, seconds: int) -> str:
     return "\n".join(out)
 
 
+def shot_timeline(spec: SceneSpec, seconds: int) -> str:
+    """Timecoded shot list scaled to the clip length (Omni cuts on these cues)."""
+    voices = spec.voices or {}
+    total = sum(max(0.5, sh.seconds) for sh in spec.shots) or 1.0
+    t, rows = 0.0, []
+    for i, sh in enumerate(spec.shots):
+        end = seconds if i == len(spec.shots) - 1 else min(seconds, t + seconds * max(0.5, sh.seconds) / total)
+        size = sh.size.replace("_", " ").upper()
+        camera = f" Camera: {sh.camera}." if sh.camera and sh.camera.lower() != "static" else " Static camera."
+        said = " ".join(
+            f'{s} ({voices.get(s, "")}{", " + d if d else ""}) says: "{x}"' for s, x, d in sh.lines
+        ) if spec.mode == "dialogue" else ""
+        rows.append(f"[{round(t)}-{round(end)}s] {size}: {sh.action.rstrip('.')}.{camera} {said or 'No dialogue.'}")
+        t = end
+    return "\n".join(rows)
+
+
 def build_prompt(spec: SceneSpec, seconds: int) -> str:
     voices = spec.voices or {}
     cast = ("In frame: " + "; ".join(f"{c} ({voices[c]})" if voices.get(c) else c for c in spec.characters) + ".") if spec.characters else ""
+    tamil = spec.language == "ta"
+    if len(spec.shots) > 1:
+        if spec.mode == "dialogue" and spec.lines:
+            speech = ("Lip-sync accurately and speak each quoted line EXACTLY as written, word for word, in that "
+                      "character's voice; a character keeps the same voice in every shot and never swaps with another. "
+                      "Nobody says anything that is not quoted.")
+            if tamil:
+                speech += " All dialogue is spoken in colloquial Tamil (தமிழ்), pronounced exactly as written."
+            sound = "Sound: quiet room tone continuous across the cuts, under the voices. No music. No narrator."
+        else:
+            speech = "Nobody speaks."
+            sound = "Sound: natural ambient sound continuous across the cuts. No dialogue, no speech, no narrator, no music."
+        return render("omni/scene", setting=spec.setting or spec.scene, timeline=shot_timeline(spec, seconds),
+                      cast=cast, speech_rules=speech, sound=sound)
     motion = spec.motion or "subtle, natural cinematic motion; the camera moves gently"
     if spec.mode == "dialogue" and spec.lines:
-        note = "All dialogue is spoken in Tamil (தமிழ்) with natural, fluent Tamil pronunciation." if spec.language == "ta" else ""
+        note = "All dialogue is spoken in Tamil (தமிழ்) with natural, fluent Tamil pronunciation." if tamil else ""
         return render("omni/dialogue", scene=spec.scene, motion=motion, cast=cast,
                       timed_lines=timed_lines(spec, seconds), language_note=note)
     return render("omni/narration", scene=spec.scene, motion=motion, cast=cast)
@@ -146,6 +189,7 @@ class OmniVideoAdapter:
         seconds = clip_seconds(spec)
         prompt = build_prompt(spec, seconds)
         cost, renders, last, first = 0.0, 0, None, None
+        first_issues: list[str] = []
         for model in self.settings.omni_model_chain:
             try:
                 while True:
@@ -154,18 +198,23 @@ class OmniVideoAdapter:
                     except ProviderError:
                         if first is None:
                             raise
-                        log.warning("scene %s: voice re-render failed; keeping the first clip", spec.order)
-                        return OmniClip(data=first, model=model, seconds=seconds, cost_usd=round(cost, 4), renders=renders)
+                        log.warning("scene %s: QC re-render failed; keeping the first clip", spec.order)
+                        return OmniClip(data=first, model=model, seconds=seconds, cost_usd=round(cost, 4),
+                                        renders=renders, qc=tuple(first_issues))
                     renders += 1
                     c = video_cost(model, seconds, self.settings.omni_resolution)
                     cost += c
                     usage.record_spend(category="video", model=model, cost_usd=c,
                                        units={"seconds": seconds, "renders": 1})
-                    if renders == 1 and self._wrong_voice(data, spec):
-                        log.warning("scene %s: wrong voice on a line; re-rendering once", spec.order)
-                        first = data
+                    issues = self.qc_issues(data, spec)
+                    if renders == 1 and issues:
+                        log.warning("scene %s: QC failed (%s); re-rendering once", spec.order, "; ".join(issues))
+                        first, first_issues = data, issues
                         continue
-                    return OmniClip(data=data, model=model, seconds=seconds, cost_usd=round(cost, 4), renders=renders)
+                    if first is not None and len(issues) > len(first_issues):
+                        data, issues = first, first_issues  # the retake was worse
+                    return OmniClip(data=data, model=model, seconds=seconds, cost_usd=round(cost, 4),
+                                    renders=renders, qc=tuple(issues))
             except _DailyExhausted as exc:
                 log.warning("omni model %s daily quota spent; trying the next", model)
                 last = exc
@@ -275,6 +324,31 @@ class OmniVideoAdapter:
         finally:
             Path(path).unlink(missing_ok=True)
 
+    def qc_issues(self, data: bytes, spec: SceneSpec) -> list[str]:
+        """Continuity QC (watch + listen vs the shot plan); falls back to the speaker check."""
+        multi = len(spec.shots) > 1
+        if not (self.settings.omni_scene_qc and (multi or (spec.mode == "dialogue" and spec.lines))):
+            return ["a line was voiced by the wrong character"] if self._wrong_voice(data, spec) else []
+        try:
+            from google.genai import types
+
+            voices = spec.voices or {}
+            shots = "\n".join(f"{i + 1}. {sh.size}: {sh.action}" for i, sh in enumerate(spec.shots)) or f"1. {spec.scene}"
+            lines = "\n".join(f"{i}. {s} ({voices.get(s, '')}): {t}" for i, (s, t, _) in enumerate(spec.lines)) or "(none)"
+            resp = self.client.models.generate_content(
+                model=self.settings.omni_speaker_check_model,
+                contents=[types.Part.from_bytes(data=_small_mp4(data), mime_type="video/mp4"),
+                          render("omni/scene_qc", language="Tamil" if spec.language == "ta" else "English",
+                                 shots=shots, lines=lines)],
+                config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SceneQC),
+            )
+            usage.record_gemini_call("text", self.settings.omni_speaker_check_model, getattr(resp, "usage_metadata", None))
+            return SceneQC.model_validate_json(resp.text).issues(len(spec.lines) if spec.mode == "dialogue" else 0,
+                                                                  len(spec.shots))
+        except Exception as exc:  # noqa: BLE001 - QC never blocks a clip
+            log.warning("scene QC skipped (%s)", exc)
+            return []
+
     def _wrong_voice(self, data: bytes, spec: SceneSpec) -> bool:
         """True when a dialogue line is clearly voiced by the wrong gender (best-effort)."""
         if not (self.settings.omni_speaker_check and spec.mode == "dialogue" and spec.lines):
@@ -300,6 +374,35 @@ class OmniVideoAdapter:
         return any(e and heard.get(i) in ("male", "female") and heard[i] != e for i, e in enumerate(expected))
 
 
+class _QCLine(BaseModel):
+    index: int
+    spoken: bool
+    right_speaker: bool
+
+
+class SceneQC(BaseModel):
+    lines: list[_QCLine] = []
+    shots_seen: int = 0
+    on_screen_text: bool = False
+    wrong_language_or_extra_speech: bool = False
+    identity_change: bool = False
+    notes: str = ""
+
+    def issues(self, planned_lines: int, planned_shots: int) -> list[str]:
+        out = [f"line {l.index + 1} not spoken" for l in self.lines if l.index < planned_lines and not l.spoken]
+        out += [f"line {l.index + 1} by the wrong character" for l in self.lines
+                if l.index < planned_lines and l.spoken and not l.right_speaker]
+        if planned_shots > 1 and self.shots_seen < math.ceil(planned_shots * 0.6):
+            out.append(f"only {self.shots_seen}/{planned_shots} planned shots")
+        if self.on_screen_text:
+            out.append("on-screen text")
+        if self.wrong_language_or_extra_speech:
+            out.append("wrong language or unplanned speech")
+        if self.identity_change:
+            out.append("a character changes between shots")
+        return out
+
+
 class _LineVoice(BaseModel):
     index: int
     gender: str
@@ -311,6 +414,16 @@ class _SpeakerCheck(BaseModel):
 
 def _mime(data: bytes) -> str:
     return "image/jpeg" if data[:3] == b"\xff\xd8\xff" else "image/png"
+
+
+def _small_mp4(mp4: bytes) -> bytes:
+    """480p copy for the QC model (keeps the inline request small)."""
+    with tempfile.TemporaryDirectory() as d:
+        src, dst = Path(d) / "in.mp4", Path(d) / "out.mp4"
+        src.write_bytes(mp4)
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vf", "scale=-2:480", "-c:v", "libx264",
+                        "-preset", "veryfast", "-crf", "30", "-c:a", "aac", "-b:a", "64k", str(dst)], check=True)
+        return dst.read_bytes()
 
 
 def _audio_wav(mp4: bytes) -> bytes:

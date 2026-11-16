@@ -19,7 +19,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class JobStatus(str, Enum):
@@ -159,6 +159,37 @@ class SceneLine(BaseModel):
     delivery: str = ""
 
 
+class SceneShotView(BaseModel):
+    size: str = "medium"
+    action: str = ""
+    lines: list[SceneLine] = Field(default_factory=list)
+
+
+class BriefView(BaseModel):
+    """What the film set out to be (from the creative brief)."""
+
+    format: str = ""
+    hook: str = ""
+    logline: str = ""
+    setting: str = ""
+    era: str = "modern"
+    period: str = ""
+    dialect: str = ""
+
+
+class FilmReviewView(BaseModel):
+    """A model's first-time-viewer review of the finished film."""
+
+    score: int = 0
+    coherence: int = 0
+    continuity: int = 0
+    dialogue: int = 0
+    hook: int = 0
+    human_made: int = 0
+    retelling: str = ""
+    confusing_moments: list[str] = Field(default_factory=list)
+
+
 class StoryboardScene(BaseModel):
     """One finished beat for the result page: a frame image + the caption the
     assembler burned into the video for that beat."""
@@ -167,6 +198,8 @@ class StoryboardScene(BaseModel):
     narration: str
     mode: str = "narration"  # narration | dialogue
     lines: list[SceneLine] = Field(default_factory=list)  # the screenplay lines (dialogue)
+    shots: list[SceneShotView] = Field(default_factory=list)  # the scene's coverage, in order
+    location: str = ""
     transcript: str = ""  # what the clip actually says (dialogue scenes, from transcription)
     # How this scene's voice was produced: narrator | on_camera | off_screen | silent
     voice: str = "narrator"
@@ -213,6 +246,8 @@ class StoryboardContent(BaseModel):
     total_tokens: int = 0  # tokens consumed generating this storyboard
     narrated: bool = False  # a synced narration track was muxed under the video
     motion_coverage: MotionCoverage | None = None
+    brief: BriefView | None = None
+    film_review: FilmReviewView | None = None
     scenes: list[StoryboardScene] = Field(default_factory=list)
 
 
@@ -232,8 +267,8 @@ class Character(BaseModel):
     )
     look: str = Field(
         description=(
-            "English visual description, fixed for the whole film: age, build, face, hair, "
-            "clothing, signature colours. Original fictional person — never a real or "
+            "English visual description, fixed for the whole film: age (adults stated as 18+), build, "
+            "face, hair, clothing, signature colours. Original fictional person — never a real or "
             "famous person."
         )
     )
@@ -268,6 +303,40 @@ class DialogueLine(BaseModel):
     )
 
 
+ShotSize = Literal["wide", "medium", "close", "extreme_close", "over_shoulder", "insert", "two_shot"]
+Transition = Literal["cut", "match_cut", "dissolve"]
+
+
+class SceneShot(BaseModel):
+    """One camera set-up inside a scene. A scene's shots are filmed as ONE continuous take
+    with cuts, so the room, light and voices stay the same across them."""
+
+    size: ShotSize = Field(default="medium", description="Shot size / framing.")
+    action: str = Field(
+        description=(
+            "English: who is in frame and what they physically do, concrete and filmable. A shot "
+            "may be a silent reaction or an insert of a prop."
+        )
+    )
+    camera: str = Field(
+        default="static",
+        description="English camera note, motivated by the action (often 'static'; or 'slow push-in', 'pan to door').",
+    )
+    seconds: float = Field(default=3.0, description="Screen time of this shot, 1.5-6 seconds.")
+    lines: list[DialogueLine] = Field(
+        default_factory=list,
+        description=(
+            "Lines spoken during this shot (may be empty for silent shots). The speaker may be "
+            "off-screen while the camera holds on the listener."
+        ),
+    )
+
+    @field_validator("size", mode="before")
+    @classmethod
+    def _known_size(cls, v):
+        return v if v in ShotSize.__args__ else "medium"
+
+
 class CastMember(BaseModel):
     """A character as shown on the status/result pages (cast card)."""
 
@@ -299,11 +368,33 @@ class Scene(BaseModel):
             "characters speak on camera."
         ),
     )
+    location: str = Field(
+        default="",
+        description="Short English location tag reused verbatim by every scene set there, e.g. 'MEENA_FLAT_KITCHEN'.",
+    )
+    time_of_day: str = Field(default="", description="English, e.g. 'night', 'dawn'.")
+    goal: str = Field(
+        default="",
+        description="English: what the scene's lead wants here, the obstacle, and how the scene turns.",
+    )
     description: str = Field(
         description=(
-            "What the CAMERA SEES — concrete, filmable action and staging, written in "
-            "English. Keep the same character(s) and setting identical across every scene."
+            "What the CAMERA SEES in the scene's OPENING shot — concrete, filmable staging, written "
+            "in English. Keep the same character(s) and setting identical across every scene."
         )
+    )
+    seconds: float = Field(default=0, description="Screen time of the whole scene (sum of its shots), at most 15.")
+    transition_in: Transition = Field(
+        default="cut",
+        description="How we enter this scene: 'cut' (default), 'match_cut' (a shape or action rhymes across the cut), 'dissolve' (time jump only).",
+    )
+    shots: list[SceneShot] = Field(
+        default_factory=list,
+        description="2-5 shots that cover the scene, in order. Dialogue lives inside the shots.",
+    )
+    exit_hook: str = Field(
+        default="",
+        description="English: the question or action that pulls the viewer into the next scene.",
     )
     characters: list[str] = Field(
         default_factory=list,
@@ -312,17 +403,22 @@ class Scene(BaseModel):
     narration: str = Field(
         default="",
         description=(
-            "Narration scenes: one short spoken sentence in the film's language (aim for "
-            "under ~15 words) that moves the story forward. Dialogue scenes: leave empty."
+            "Narration scenes: the narrator's words for this scene in the film's language, within the "
+            "scene's word budget, moving the story forward. Dialogue scenes: leave empty."
         ),
     )
     lines: list[DialogueLine] = Field(
         default_factory=list,
-        description=(
-            "Dialogue scenes only: 1-4 spoken lines by at most 2 characters, in the film's "
-            "language. Narration scenes: leave empty."
-        ),
+        description="Leave empty — filled by the pipeline from the shots' lines.",
     )
+
+    @field_validator("transition_in", mode="before")
+    @classmethod
+    def _known_transition(cls, v):
+        return v if v in Transition.__args__ else "cut"  # older artifacts may carry retired values
+
+    def shot_lines(self) -> list[DialogueLine]:
+        return [line for shot in self.shots for line in shot.lines]
 
     def spoken_text(self) -> str:
         """Everything spoken in this beat (narration or the joined dialogue)."""
@@ -380,12 +476,84 @@ class Script(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Creative brief (what the creator is trying to make, before any writing)
+# --------------------------------------------------------------------------- #
+Era = Literal["modern", "period"]
+
+
+class SpeechRegister(BaseModel):
+    era: Era = Field(
+        default="modern",
+        description="'modern' = present-day setting; 'period' = any clearly past (or historical/mythic) setting.",
+    )
+    period: str = Field(default="present day", description="English, e.g. 'present day', 'Madras, 1972', 'Chola court, 11th century'.")
+    dialect: str = Field(
+        default="",
+        description=(
+            "English: how these people actually talk, e.g. 'colloquial Chennai Tamil, young friends', "
+            "'Madurai Tamil, rural elders', 'casual American English, Gen Z'."
+        ),
+    )
+    slang: str = Field(
+        default="",
+        description="English: slang and code-mixing level that fits the characters, era and setting (or 'none').",
+    )
+    avoid: str = Field(default="", description="English: words, slang or tech that would be anachronistic or off-register.")
+
+
+class PlannedScene(BaseModel):
+    order: int = Field(description="1-based scene order.")
+    purpose: str = Field(description="English: what this scene does for the story (hook, setup, turn, payoff...).")
+    location: str = Field(default="", description="English location tag, reused for every scene in the same place.")
+    seconds: float = Field(description="Screen time for this scene, 5-15 seconds.")
+    mode: SceneMode = Field(default="dialogue", description="'dialogue' (characters speak on camera) or 'narration' (narrator over picture).")
+
+
+class CreativeBrief(BaseModel):
+    """The creator's intent, decided once and obeyed by every later agent."""
+
+    format: str = Field(description="English, e.g. 'short drama', 'monologue', 'comedy skit', 'heist thriller', 'emotional slice of life'.")
+    purpose: str = Field(description="English: why someone would watch and share this; the feeling it leaves.")
+    audience: str = Field(default="", description="English: who it's for.")
+    hook: str = Field(description="English: exactly what the viewer sees and hears in the first 2 seconds that stops the scroll.")
+    logline: str = Field(description="English: one sentence — who wants what, what stands in the way, how it turns out.")
+    setting: str = Field(description="English: place and time, concrete.")
+    speech: SpeechRegister = Field(default_factory=SpeechRegister)
+    user_structure: str = Field(
+        default="",
+        description=(
+            "If the idea already spells out beats, timecodes or a structure, restate it here faithfully "
+            "(English). Otherwise empty."
+        ),
+    )
+    originality_note: str = Field(
+        default="",
+        description=(
+            "If the idea names an existing film, character, franchise or real person: the original names "
+            "and look that replace them while keeping the premise. Otherwise empty."
+        ),
+    )
+    scenes: list[PlannedScene] = Field(description="The scene plan, in order.")
+
+
+# --------------------------------------------------------------------------- #
 # Designer artifacts (Phase 2 — defined now so the schema is stable)
 # --------------------------------------------------------------------------- #
+class LocationSpec(BaseModel):
+    tag: str = Field(description="The scene 'location' tag, verbatim.")
+    look: str = Field(
+        description=(
+            "English, fixed for the whole film: layout, key furniture and props and where they sit, "
+            "materials, colours, light sources. Every shot set here must match it."
+        )
+    )
+
+
 class Shot(BaseModel):
     order: int = Field(
         description="Matches the source scene's order (1-based, story order)."
     )
+    location: str = Field(default="", description="The scene's location tag, verbatim.")
     image_prompt: str = Field(
         description=(
             "Self-contained prompt for the image model: restate the scene visually AND "
@@ -411,9 +579,13 @@ class Shotlist(BaseModel):
             "look). The anti-drift contract."
         )
     )
+    locations: list[LocationSpec] = Field(
+        default_factory=list,
+        description="One entry per distinct scene location tag: the fixed set every scene there reuses.",
+    )
     shots: list[Shot] = Field(
         description=(
-            "Exactly one shot per script scene, preserving each scene's order and "
+            "Exactly one shot per script scene (its OPENING frame), preserving each scene's order and "
             "narration."
         )
     )
@@ -431,6 +603,18 @@ class JudgeReport(BaseModel):
     arithmetic), so a threshold means the same thing in eval and in reflection.
     """
 
+    # Declared first: the judge retells the film before scoring it (a table read).
+    retelling: str = Field(
+        default="",
+        description=(
+            "Retell the story in 2-3 sentences using ONLY what a viewer would see and hear (actions and "
+            "spoken words), as a first-time viewer would summarise it."
+        ),
+    )
+    hook: int = Field(default=0, description="0-100: do the first 2 seconds stop the scroll and raise a question?")
+    brief_adherence: int = Field(
+        default=0, description="0-100: does it deliver the creative brief (format, purpose, structure, logline)?"
+    )
     structure: int = Field(
         default=0,
         description="0-100: beginning/middle/end present; does beat_role progress sensibly?",
@@ -451,6 +635,14 @@ class JudgeReport(BaseModel):
     dialogue: int = Field(
         default=0,
         description="0-100: natural, in-character, speakable lines (only scored when the film has dialogue).",
+    )
+    dialogue_thread: int = Field(
+        default=0,
+        description="0-100: within each scene every line answers the one before; threads carry across scenes (dialogue only).",
+    )
+    register_fit: int = Field(
+        default=0,
+        description="0-100: spoken words fit the era, place, dialect and characters (today's slang vs period speech).",
     )
     # Recomputed as a weighted mean by the judge — never trusted from the model.
     overall: int = Field(

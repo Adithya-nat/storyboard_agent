@@ -130,3 +130,35 @@ async def test_kenburns_single_clip(tmp_path):
     w, h, dur = _probe(str(out))
     assert (w, h) == (720, 1280)
     assert abs(dur - 2.5) < 0.4
+
+
+def test_hard_cuts_concat_and_dissolves_xfade():
+    from app.adapters.video import xfade_offsets
+
+    holds = [3.0, 2.0, 4.0]
+    fc, final = _xfade_filter(3, holds, [0.0, 0.5])
+    assert "[0:v][1:v]concat=n=2:v=1:a=0[x1]" in fc and "[x1][2:v]xfade=transition=fade:duration=0.500:offset=4.500" in fc
+    assert xfade_offsets(holds, [0.0, 0.5]) == [0.0, 3.0, 4.5]  # audio lands on the same cuts
+
+
+@_needs_ffmpeg
+async def test_hard_cut_edit_keeps_full_runtime(tmp_path):
+    clips = _clips(tmp_path, 3, hold=2.0)
+    out = tmp_path / "cuts.mp4"
+    await assemble_kenburns(clips, str(out), crossfade=[0.0, 0.0])
+    _w, _h, dur = _probe(str(out))
+    assert abs(dur - 6.0) < 0.3  # no overlap lost to fades
+
+
+@_needs_ffmpeg
+async def test_mix_trims_clip_audio_to_its_scene(tmp_path):
+    from app.adapters.video import build_mix
+
+    tone = tmp_path / "tone.wav"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=5", str(tone)], check=True)
+    out = tmp_path / "mix.wav"
+    await build_mix(speech=[(str(tone), 0.0, 2.0)], ambience=[], music=None, total_seconds=4.0, output_path=str(out))
+    # The 5s clip audio is cut at its 2s scene instead of bleeding into the next one.
+    dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(out)],
+                               capture_output=True, text=True).stdout)
+    assert abs(dur - 2.0) < 0.05

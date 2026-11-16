@@ -25,6 +25,7 @@ from app.agents.narration import voice_lines
 from app.core.images import burn_caption, render_caption_overlay
 from app.core.logging import get_logger
 from app.graph.state import Deps, StoryboardState
+from app.schemas import Script
 
 log = get_logger(__name__)
 
@@ -59,11 +60,12 @@ async def assembler(state: StoryboardState, deps: Deps) -> StoryboardState:
 
     motion_paths = _motion_paths(frames, state, deps)
     if settings.enable_motion:
-        d = settings.crossfade_seconds
+        d = _transitions(frames, state, deps)
+        floor = 2 * max(d) if d else 0.0
         if holds is None:  # silent path: total == target duration exactly
-            holds = [max(2 * d, (state["duration"] + (n - 1) * d) / n)] * n
+            holds = [max(floor, (state["duration"] + sum(d)) / n)] * n
         else:
-            holds = [max(2 * d, h) for h in holds]
+            holds = [max(floor, h) for h in holds]
         clips = [
             (f["path"], store.save_bytes(f"capov_{f['order']:02d}.png", render_caption_overlay(cap)), hold)
             for f, cap, hold in zip(frames, captions, holds)
@@ -93,6 +95,18 @@ async def assembler(state: StoryboardState, deps: Deps) -> StoryboardState:
     return result
 
 
+def _transitions(frames, state: StoryboardState, deps: Deps) -> list[float]:
+    """Per-cut overlap: hard cuts (0) like an editor, a dissolve only where the script marks a time jump."""
+    d = deps.settings.crossfade_seconds
+    if not deps.settings.editor_hard_cuts:
+        return [d] * (len(frames) - 1)
+    kinds: dict[int, str] = {}
+    if state.get("script_path") and os.path.exists(state["script_path"]):
+        script = Script.model_validate(deps.store.load_json(state["script_path"]))
+        kinds = {sc.order: sc.transition_in for sc in script.scenes}
+    return [d if kinds.get(f["order"]) == "dissolve" else 0.0 for f in frames[1:]]
+
+
 def _motion_paths(frames, state: StoryboardState, deps: Deps) -> list[str | None] | None:
     """Per-scene engine clip paths aligned to frames (only files that exist)."""
     if not deps.settings.motion_in_film:
@@ -116,7 +130,7 @@ async def _lay_audio(frames, holds, offsets, by_order, motion_paths, state, deps
         meta = by_order.get(f["order"], {})
         voice = meta.get("voice")
         if voice in ("narrator", "off_screen") and meta.get("path"):
-            speech.append((meta["path"], offsets[i]))
+            speech.append((meta["path"], offsets[i]))  # a voiceover may run across the cut
         clip = motion_paths[i] if motion_paths else None
         if clip and f["order"] in clip_audio:
             wav = store.abspath(f"clipaudio_{f['order']:02d}.wav")
@@ -125,7 +139,7 @@ async def _lay_audio(frames, holds, offsets, by_order, motion_paths, state, deps
             except Exception as exc:  # noqa: BLE001
                 warnings.append(f"audio: scene {f['order']} clip audio unreadable ({exc})")
                 continue
-            (speech if voice == "on_camera" else ambience).append((wav, offsets[i]))
+            (speech if voice == "on_camera" else ambience).append((wav, offsets[i], holds[i]))
 
     music = state.get("music_path") if settings.music_enabled else None
     if not (speech or ambience or music):

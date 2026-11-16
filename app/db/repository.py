@@ -99,6 +99,31 @@ async def add_artifact(
     return artifact
 
 
+async def upsert_artifact(
+    session: AsyncSession,
+    job_id: str,
+    *,
+    kind: str,
+    path: str,
+    status: str = "ok",
+    order_index: int | None = None,
+) -> None:
+    """Insert one artifact, replacing any existing row with the same
+    (job, kind, order). Used to publish a frame the moment it renders, so a
+    retried/resumed stage never shows the same frame twice mid-run."""
+    await session.execute(
+        delete(Artifact).where(
+            Artifact.job_id == job_id,
+            Artifact.kind == kind,
+            Artifact.order_index == order_index,
+        )
+    )
+    session.add(
+        Artifact(job_id=job_id, kind=kind, path=path, status=status, order_index=order_index)
+    )
+    await session.commit()
+
+
 async def replace_artifacts(
     session: AsyncSession, job_id: str, artifacts: list[dict]
 ) -> None:

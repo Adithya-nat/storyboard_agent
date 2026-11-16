@@ -53,7 +53,8 @@ def _video(i="int-1"):
 
 
 def _adapter(tmp_path, items, **kw):
-    s = Settings(gemini_api_key="k", use_mock_providers=False, omni_rpm_limit=100000, omni_speaker_check=False, **kw)
+    s = Settings(gemini_api_key="k", use_mock_providers=False, omni_rpm_limit=100000, omni_speaker_check=False,
+                 **{"omni_scene_qc": False, **kw})
     a = OmniVideoAdapter(s, journal_dir=tmp_path / "ops")
     fake = _Fake(items)
     a._client = SimpleNamespace(interactions=fake, models=None, files=None)
@@ -107,6 +108,38 @@ def test_wrong_voice_rerenders_once(tmp_path, monkeypatch):
     monkeypatch.setattr(a, "_wrong_voice", lambda *_: next(verdicts))
     clip = a.generate(JPEG, DIALOGUE, key="job-5")
     assert len(fake.calls) == 2 and clip.renders == 2 and clip.cost_usd == pytest.approx(2 * 7 * 0.104)
+
+
+def test_scene_qc_rerenders_once_and_keeps_the_better_take(tmp_path, monkeypatch):
+    a, fake = _adapter(tmp_path, [_video("a"), _video("b")], omni_scene_qc=True)
+    verdicts = iter([["line 1 not spoken"], ["line 1 not spoken", "on-screen text"]])
+    monkeypatch.setattr(a, "qc_issues", lambda *_: next(verdicts))
+    clip = a.generate(JPEG, DIALOGUE, key="job-6")
+    assert len(fake.calls) == 2 and clip.renders == 2
+    assert clip.qc == ("line 1 not spoken",)  # the retake was worse -> first take kept
+
+
+def test_scene_qc_issue_rules():
+    from app.adapters.omni import SceneQC, _QCLine
+
+    qc = SceneQC(lines=[_QCLine(index=0, spoken=True, right_speaker=True), _QCLine(index=1, spoken=True, right_speaker=False)],
+                 shots_seen=1, on_screen_text=True)
+    assert qc.issues(2, 4) == ["line 2 by the wrong character", "only 1/4 planned shots", "on-screen text"]
+    assert SceneQC(shots_seen=3).issues(0, 4) == []
+
+
+def test_multi_shot_prompt_has_timecoded_cuts():
+    from app.adapters.omni import SceneSpec, ShotSpec, build_prompt
+
+    spec = SceneSpec(order=1, scene="kitchen", mode="dialogue", characters=("A", "B"), seconds=10,
+                     lines=(("A", "You're early.", ""), ("B", "I quit.", "")), voices={"A": "FEMALE, 20s", "B": "MALE, 20s"},
+                     setting="a small kitchen at night",
+                     shots=(ShotSpec("wide", "A cooks; B enters", seconds=4, lines=(("A", "You're early.", ""),)),
+                            ShotSpec("close", "B looks away", seconds=4, lines=(("B", "I quit.", ""),)),
+                            ShotSpec("close", "A freezes", seconds=2)))
+    p = build_prompt(spec, 10)
+    assert "[0-4s] WIDE" in p and "[4-8s] CLOSE" in p and "[8-10s] CLOSE: A freezes. Static camera. No dialogue." in p
+    assert "no scene cuts" not in p.lower() and 'B (MALE, 20s) says: "I quit."' in p
 
 
 def test_omni_is_the_default_video_stage():

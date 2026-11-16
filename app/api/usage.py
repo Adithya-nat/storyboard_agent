@@ -36,6 +36,7 @@ class RunRow(BaseModel):
     omni_scenes: int
     fallback_scenes: int
     judge_score: int | None
+    film_score: int | None = None
     runtime_seconds: float
     models: list[str]
     started_at: datetime | None

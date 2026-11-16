@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 
 from app.core.logging import get_logger
-from app.graph.state import Deps, StoryboardState
+from app.agents.brief import mock_brief, normalize_brief, speech_block
+from app.graph.state import SCENE_MAX_SECONDS, Deps, StoryboardState
 from app.prompts import render
-from app.schemas import LANGUAGE_NAMES, Character, DialogueLine, Scene, Script
+from app.schemas import LANGUAGE_NAMES, Character, CreativeBrief, DialogueLine, Scene, SceneShot, Script
 
 log = get_logger(__name__)
 
@@ -17,27 +18,34 @@ STYLES = ("narrated", "dialogue", "mixed")
 WORDS_PER_SECOND = {"en": 2.6, "ta": 1.8}
 
 
-def _system_prompt(n: int, style: str = "narrated", language: str = "en", seconds_per_scene: float = 4.0) -> str:
+def word_budget(seconds: float, language: str, mode: str) -> int:
+    """Max spoken words for a scene: dialogue leaves ~1.5s of air, narration ~15%."""
+    wps = WORDS_PER_SECOND.get(language, 2.6)
+    if mode == "dialogue":
+        return max(4, round((seconds - 1.5) * wps * 0.9))
+    return max(6, round(seconds * wps * 0.85))
+
+
+def _system_prompt(
+    n: int, style: str = "narrated", language: str = "en", seconds_per_scene: float = 10.0,
+    brief: CreativeBrief | None = None,
+) -> str:
     style = style if style in STYLES else "narrated"
     language = language if language in WORDS_PER_SECOND else "en"
-    wps = WORDS_PER_SECOND[language]
+    plan = [(s.seconds, s.mode) for s in brief.scenes] if brief else [(seconds_per_scene, "dialogue" if style != "narrated" else "narration")] * n
+    budgets = "\n".join(
+        f"  - scene {i}: {sec:g}s, {mode} -> at most {word_budget(sec, language, mode)} words" for i, (sec, mode) in enumerate(plan, 1)
+    )
     has_dialogue = style in ("dialogue", "mixed")
     return render(
         "script_writer/system",
         n=n,
         style_block=render(f"script_writer/style_{style}"),
         language_block=render(f"script_writer/language_{language}"),
+        register_block=speech_block(brief, language),
         beat_roles=", ".join(BEAT_ROLES),
-        narr_words=max(6, round(seconds_per_scene * wps * 0.85)),
-        dialogue_rules=render(
-            "script_writer/dialogue_rules",
-            wps=wps,
-            scene_seconds=round(seconds_per_scene),
-            scene_words=max(5, round((seconds_per_scene - 1.0) * wps)),
-        )
-        + "\n"
-        if has_dialogue
-        else "",
+        budgets=budgets,
+        dialogue_rules=render("script_writer/dialogue_rules", wps=WORDS_PER_SECOND[language]) + "\n" if has_dialogue else "",
     )
 
 
@@ -89,28 +97,39 @@ _MOCK_CAST = {
 }
 
 
-def _mock_script(prompt: str, n: int, style: str = "narrated", language: str = "en") -> Script:
+def _mock_script(
+    prompt: str, n: int, style: str = "narrated", language: str = "en", modes: list[str] | None = None,
+    seconds: list[float] | None = None,
+) -> Script:
     """Deterministic offline script so the pipeline runs without an API key."""
-    roles, modes = _beat_roles(n), scene_modes(n, style)
+    roles, modes = _beat_roles(n), modes or scene_modes(n, style)
     cast = _MOCK_CAST.get(language, _MOCK_CAST["en"])
     a, b = cast[0].name, cast[1].name
     scenes = []
     for i in range(1, n + 1):
         dialogue = modes[i - 1] == "dialogue"
+        secs = (seconds or [])[i - 1] if seconds and i <= len(seconds) else 8.0
+        lines = [
+            DialogueLine(speaker=a, text=f"Line {i}a about {prompt[:30]}.", delivery="curious"),
+            DialogueLine(speaker=b, text=f"Line {i}b in reply.", delivery="quiet"),
+        ] if dialogue else []
+        shots = [
+            SceneShot(size="wide", action=f"{a} and {b} in the main location (mock)", seconds=secs * 0.4, lines=lines[:1]),
+            SceneShot(size="close", action=f"{b} reacts (mock)", seconds=secs * 0.35, lines=lines[1:]),
+            SceneShot(size="insert", action="a key prop (mock)", seconds=secs * 0.25),
+        ]
         scenes.append(
             Scene(
                 order=i,
                 beat_role=roles[i - 1],
                 mode=modes[i - 1],
+                location="MAIN_LOCATION",
                 description=f"Scene {i}: {prompt} — beat {i} of {n}.",
+                seconds=secs,
+                shots=shots,
                 characters=[a, b] if dialogue else [a],
                 narration="" if dialogue else f"Beat {i}: {prompt[:60]}",
-                lines=[
-                    DialogueLine(speaker=a, text=f"Line {i}a about {prompt[:30]}.", delivery="curious"),
-                    DialogueLine(speaker=b, text=f"Line {i}b in reply.", delivery="quiet"),
-                ]
-                if dialogue
-                else [],
+                lines=list(lines),
             )
         )
     return Script(
@@ -128,37 +147,76 @@ def _mock_script(prompt: str, n: int, style: str = "narrated", language: str = "
     )
 
 
-def normalize_script(script: Script, *, style: str, language: str, n: int) -> Script:
+def _fit_shots(sc: Scene) -> None:
+    """Every scene has >= 1 shot whose seconds add up to the scene's seconds."""
+    if not sc.shots:
+        sc.shots = [SceneShot(size="medium", action=sc.description, seconds=sc.seconds or 4.0, lines=list(sc.lines))]
+    if not sc.seconds:
+        sc.seconds = sum(max(0.5, sh.seconds) for sh in sc.shots)
+    sc.seconds = round(min(SCENE_MAX_SECONDS, sc.seconds), 1)
+    total = sum(max(0.5, sh.seconds) for sh in sc.shots)
+    for sh in sc.shots:
+        sh.seconds = round(max(0.5, sh.seconds) * sc.seconds / total, 2)
+
+
+def normalize_script(
+    script: Script, *, style: str, language: str, n: int, brief: CreativeBrief | None = None,
+) -> Script:
     """Enforce pipeline invariants on model output: requested style/language, modes that
-    match the style, <=2 known speakers per dialogue scene, orders 1..n."""
+    match the style (or the brief's plan), <=2 known speakers per dialogue scene, shots that
+    fill each scene, scene.lines = the shots' lines, orders 1..n."""
     script.story_style, script.language = style, language
     known = {c.name.strip().upper() for c in script.characters}
+    plan = {p.order: p for p in brief.scenes} if brief else {}
     scenes = sorted(script.scenes, key=lambda x: x.order)[: n or None]
     for idx, sc in enumerate(scenes, start=1):
         sc.order = idx
+        if idx in plan:
+            sc.seconds = plan[idx].seconds or sc.seconds
+            sc.location = sc.location or plan[idx].location
         sc.characters = [c.strip().upper() for c in sc.characters if c.strip()]
         if style in ("narrated", "dialogue"):
             sc.mode = "narration" if style == "narrated" else "dialogue"
-        for line in sc.lines:
+        elif idx in plan:
+            sc.mode = plan[idx].mode
+        if not sc.shots and sc.lines:  # older/flat output: one shot carries the lines
+            sc.shots = [SceneShot(size="medium", action=sc.description, seconds=sc.seconds or 4.0, lines=list(sc.lines))]
+        lines = sc.shot_lines() if sc.shots else list(sc.lines)
+        for line in lines:
             line.speaker = line.speaker.strip().upper()
         if sc.mode == "dialogue":
-            speakers = list(dict.fromkeys(l.speaker for l in sc.lines))[:2]
-            sc.lines = [l for l in sc.lines if l.speaker in speakers and l.text.strip()]
+            speakers = list(dict.fromkeys(l.speaker for l in lines if l.text.strip()))[:2]
+            for shot in sc.shots:
+                shot.lines = [l for l in shot.lines if l.speaker in speakers and l.text.strip()]
             for spk in speakers:
                 if spk not in known:
                     script.characters.append(Character(name=spk, look=""))
                     known.add(spk)
                 if spk not in sc.characters:
                     sc.characters.append(spk)
-            if not sc.lines:  # nothing said -> narrate the beat instead
+            sc.lines = sc.shot_lines() if sc.shots else [l for l in lines if l.speaker in speakers and l.text.strip()]
+            sc.narration = ""
+            if not sc.lines:  # nothing said -> narrate the scene instead
                 sc.mode = "narration"
-                sc.narration = sc.narration or sc.description
+                sc.narration = sc.description
         else:
-            if not sc.narration.strip() and sc.lines:
-                sc.narration = " ".join(l.text for l in sc.lines)
+            if not sc.narration.strip() and lines:
+                sc.narration = " ".join(l.text for l in lines)
             sc.lines = []
+            for shot in sc.shots:
+                shot.lines = []
+        _fit_shots(sc)
     script.scenes = scenes
     return script
+
+
+def load_brief(state: StoryboardState, deps: Deps, style: str, n: int) -> CreativeBrief:
+    """The run's creative brief; a default plan when called without the brief stage."""
+    if deps.store.exists("brief.json"):
+        return CreativeBrief.model_validate(deps.store.load_json(deps.store.abspath("brief.json")))
+    duration = state.get("duration") or 30
+    b = mock_brief(state.get("prompt", ""), n, duration, style)
+    return normalize_brief(b, duration=duration, style=style, n_override=n)
 
 
 async def script_writer(state: StoryboardState, deps: Deps) -> StoryboardState:
@@ -169,27 +227,29 @@ async def script_writer(state: StoryboardState, deps: Deps) -> StoryboardState:
 
     style = state.get("style") or deps.settings.default_style
     language = state.get("language") or deps.settings.default_language
-    n = deps.frame_count(state["duration"], style)
-    seconds = state["duration"] / max(1, n)
+    brief = load_brief(state, deps, style, deps.frame_count(state["duration"], style))
+    n = len(brief.scenes)
     lang_name = LANGUAGE_NAMES.get(language, language)
-    log.info("writing a %d-beat %s script in %s: %r", n, style, lang_name, state["prompt"][:80])
+    log.info("writing a %d-scene %s screenplay in %s: %r", n, style, lang_name, state["prompt"][:80])
     script: Script = await asyncio.to_thread(
         deps.llm.complete_json,
-        system=_system_prompt(n, style, language, seconds),
+        system=_system_prompt(n, style, language, brief=brief),
         user=render(
             "script_writer/user",
-            idea=state["prompt"], duration=state["duration"], n=n,
-            seconds=round(seconds), style=style, language=lang_name,
+            idea=state["prompt"], brief_json=brief.model_dump_json(indent=2), duration=state["duration"],
+            n=n, style=style, language=lang_name,
         ),
         response_model=Script,
         role="script",
-        mock_factory=lambda _u: _mock_script(state["prompt"], n, style, language),
+        mock_factory=lambda _u: _mock_script(
+            state["prompt"], n, style, language, [p.mode for p in brief.scenes], [p.seconds for p in brief.scenes]
+        ),
     )
-    script = normalize_script(script, style=style, language=language, n=n)
+    script = normalize_script(script, style=style, language=language, n=n, brief=brief)
     path = deps.store.save_json("script.json", script)
     log.info(
-        "script ready: %r — %d scenes (%d dialogue), cast: %s",
-        script.title, len(script.scenes), sum(sc.mode == "dialogue" for sc in script.scenes),
-        ", ".join(c.name for c in script.characters) or "none",
+        "screenplay ready: %r — %d scenes, %d shots, %d lines; cast: %s",
+        script.title, len(script.scenes), sum(len(sc.shots) for sc in script.scenes),
+        sum(len(sc.lines) for sc in script.scenes), ", ".join(c.name for c in script.characters) or "none",
     )
     return {"script_path": path}
