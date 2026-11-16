@@ -159,11 +159,82 @@ async def try_acquire_job(session: AsyncSession, job_id: str) -> bool:
     """
     result = await session.execute(
         update(Job)
-        .where(Job.id == job_id, Job.status != JobStatus.RUNNING.value)
-        .values(status=JobStatus.RUNNING.value, error=None)
+        .where(Job.id == job_id, Job.status.not_in(_ACTIVE))
+        .values(status=JobStatus.RUNNING.value, error=None, pause_requested_at=None)
     )
     await session.commit()
     return (result.rowcount or 0) > 0
+
+
+# --------------------------------------------------------------------------- #
+# Run controls (pause / breakpoints). Every transition is one conditional UPDATE,
+# so a pause, a withdrawn pause and the runner parking the job can't interleave.
+# --------------------------------------------------------------------------- #
+_ACTIVE = (JobStatus.RUNNING.value, JobStatus.PAUSING.value)
+
+
+async def request_pause(session: AsyncSession, job_id: str) -> bool:
+    """running -> pausing. False if the job isn't running (nothing to pause)."""
+    result = await session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.status == JobStatus.RUNNING.value)
+        .values(status=JobStatus.PAUSING.value, pause_requested_at=_utcnow())
+    )
+    await session.commit()
+    return (result.rowcount or 0) > 0
+
+
+async def withdraw_pause(session: AsyncSession, job_id: str) -> bool:
+    """pausing -> running (the user changed their mind while units were draining)."""
+    result = await session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.status == JobStatus.PAUSING.value)
+        .values(status=JobStatus.RUNNING.value, pause_requested_at=None)
+    )
+    await session.commit()
+    return (result.rowcount or 0) > 0
+
+
+async def pause_requested(session: AsyncSession, job_id: str) -> bool:
+    flag = await session.scalar(select(Job.pause_requested_at).where(Job.id == job_id))
+    return flag is not None
+
+
+async def park_job(session: AsyncSession, job_id: str) -> bool:
+    """Park a drained job: -> paused, iff the pause is still wanted. False means the pause
+    was withdrawn while draining, so the runner carries on instead of parking."""
+    result = await session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.status.in_(_ACTIVE), Job.pause_requested_at.is_not(None))
+        .values(status=JobStatus.PAUSED.value, pause_requested_at=None)
+    )
+    await session.commit()
+    return (result.rowcount or 0) > 0
+
+
+async def set_breakpoints(session: AsyncSession, job_id: str, stages: list[str]) -> list[str]:
+    clean = list(dict.fromkeys(s for s in stages if s))
+    await session.execute(update(Job).where(Job.id == job_id).values(breakpoints=clean or None))
+    await session.commit()
+    return clean
+
+
+async def consume_breakpoint(session: AsyncSession, job_id: str, stage: str) -> bool:
+    """If ``stage`` is a breakpoint: remove it and raise the pause flag (one transaction)."""
+    bps = await session.scalar(select(Job.breakpoints).where(Job.id == job_id)) or []
+    if stage not in bps:
+        return False
+    await session.execute(
+        update(Job)
+        .where(Job.id == job_id)
+        .values(
+            breakpoints=[b for b in bps if b != stage] or None,
+            pause_requested_at=_utcnow(),
+            status=JobStatus.PAUSING.value,
+        )
+    )
+    await session.commit()
+    return True
 
 
 async def reap_orphaned_jobs(session: AsyncSession) -> int:
@@ -174,6 +245,19 @@ async def reap_orphaned_jobs(session: AsyncSession) -> int:
     forever and clients polling into the void — a silent failure. This converts
     that into an explicit, visible terminal state.
     """
+    # A job that was draining toward a pause keeps that intent: it parks as paused
+    # (its in-flight units are lost with the process, but nothing else is).
+    pausing = select(Job.id).where(Job.status == JobStatus.PAUSING.value)
+    await session.execute(
+        update(JobStage)
+        .where(JobStage.job_id.in_(pausing), JobStage.status.in_(["pending", "running"]))
+        .values(status="paused", ended_at=_utcnow(), message="Paused (service restarted while pausing)")
+    )
+    await session.execute(
+        update(Job)
+        .where(Job.status == JobStatus.PAUSING.value)
+        .values(status=JobStatus.PAUSED.value, pause_requested_at=None)
+    )
     live = [JobStatus.QUEUED.value, JobStatus.RUNNING.value]
     result = await session.execute(
         update(Job)
@@ -200,7 +284,9 @@ async def reap_orphaned_jobs(session: AsyncSession) -> int:
     return result.rowcount or 0
 
 
-async def delete_expired_jobs(session: AsyncSession, ttl_seconds: int) -> list[str]:
+async def delete_expired_jobs(
+    session: AsyncSession, ttl_seconds: int, paused_ttl_seconds: int | None = None
+) -> list[str]:
     """Delete jobs older than ``ttl_seconds`` + all their child rows; return the
     deleted ids so the caller can remove their on-disk artifact directories.
 
@@ -209,14 +295,19 @@ async def delete_expired_jobs(session: AsyncSession, ttl_seconds: int) -> list[s
     tiny for a single-user service, so we filter in Python to dodge cross-DB tz
     comparison quirks on ``created_at``."""
     now = datetime.now(timezone.utc)
-    rows = (await session.execute(select(Job.id, Job.created_at, Job.status))).all()
+    rows = (await session.execute(select(Job.id, Job.created_at, Job.updated_at, Job.status))).all()
     expired: list[str] = []
-    for job_id, created, status in rows:
-        if status == JobStatus.RUNNING.value:  # never delete a film mid-run
+    for job_id, created, updated, status in rows:
+        if status in _ACTIVE:  # never delete a film mid-run (or mid-pause)
             continue
+        if status == JobStatus.PAUSED.value and paused_ttl_seconds is not None:
+            # A paused film is kept from when it was paused, so a long pause is safe.
+            created, ttl = (updated or created), paused_ttl_seconds
+        else:
+            ttl = ttl_seconds
         if created.tzinfo is None:  # SQLite hands back naive datetimes
             created = created.replace(tzinfo=timezone.utc)
-        if now - created >= timedelta(seconds=ttl_seconds):
+        if now - created >= timedelta(seconds=ttl):
             expired.append(job_id)
     if not expired:
         return []
@@ -279,6 +370,19 @@ async def upsert_stage_running(
         stage.started_at = _utcnow()
         stage.ended_at = None
         stage.message = None
+    await session.commit()
+
+
+async def pause_stage(session: AsyncSession, job_id: str, name: str, seq: int, message: str) -> None:
+    """Mark a stage paused, creating its row when the pause landed before it started."""
+    stage = (
+        await session.execute(select(JobStage).where(JobStage.job_id == job_id, JobStage.name == name))
+    ).scalar_one_or_none()
+    if stage is None:
+        session.add(JobStage(job_id=job_id, name=name, seq=seq, status="paused", message=message,
+                             started_at=_utcnow(), ended_at=_utcnow()))
+    else:
+        stage.status, stage.message, stage.ended_at = "paused", message, _utcnow()
     await session.commit()
 
 

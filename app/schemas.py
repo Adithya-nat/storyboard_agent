@@ -29,6 +29,8 @@ class JobStatus(str, Enum):
     COMPLETED_WITH_WARNINGS = "completed_with_warnings"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
+    PAUSING = "pausing"  # pause requested; in-flight paid units are finishing
+    PAUSED = "paused"    # parked; resume continues from the first unfinished unit
 
 
 TERMINAL_STATUSES = {
@@ -36,6 +38,7 @@ TERMINAL_STATUSES = {
     JobStatus.COMPLETED_WITH_WARNINGS,
     JobStatus.FAILED,
     JobStatus.INTERRUPTED,
+    JobStatus.PAUSED,  # no runner is active (the stream closes); resumable
 }
 
 
@@ -72,6 +75,49 @@ class VideoGap(BaseModel):
 
 class ResumeRequest(BaseModel):
     allow_stills: bool = False  # finish now: scenes without a clip use their still image
+
+
+class BreakpointsRequest(BaseModel):
+    """Stages to pause BEFORE (e.g. review the screenplay before paying for AI video)."""
+
+    stages: list[str] = Field(default_factory=list)
+
+
+class UnitProgress(BaseModel):
+    """Per-unit state of a stage that spends per item (frames, scene clips)."""
+
+    noun: str              # "frames" | "AI clips"
+    total: int
+    done: list[int] = Field(default_factory=list)       # on disk: reused on resume, never re-billed
+    in_flight: list[int] = Field(default_factory=list)  # submitted + paid; finishing
+    pending: list[int] = Field(default_factory=list)    # not started; generated on resume
+    unit_cost_usd: float = 0.0                          # estimate for one pending unit
+
+
+class CheckpointStage(BaseModel):
+    name: str
+    status: str            # pending | running | succeeded | paused | ...
+    cost_usd: float = 0.0  # already spent in this stage (kept on resume)
+    remaining_usd: float = 0.0
+    units: UnitProgress | None = None
+    breakpoint: bool = False
+
+
+class Checkpoint(BaseModel):
+    """Where a run stands and what finishing it would cost: the pause/resume view."""
+
+    job_id: str
+    status: JobStatus
+    pause_requested: bool = False
+    paused_stage: str | None = None   # where it stopped (or is about to)
+    paused_message: str | None = None
+    resume_stage: str | None = None   # first stage resume will (re)enter
+    resume_unit: int | None = None    # first unit resume generates in that stage
+    breakpoints: list[str] = Field(default_factory=list)
+    spent_usd: float = 0.0            # kept: finished work is reused, never re-billed
+    remaining_usd: float = 0.0        # estimate to finish from here
+    estimate_basis: Literal["history", "units"] = "units"
+    stages: list[CheckpointStage] = Field(default_factory=list)
 
 
 class JobCreatedResponse(BaseModel):
@@ -153,6 +199,8 @@ class JobStatusResponse(BaseModel):
     stages: list[StageRef] = Field(default_factory=list)
     artifacts: list[ArtifactRef] = Field(default_factory=list)
     video_gap: VideoGap | None = None  # set when the film can be finished with stills
+    pause_requested: bool = False      # a pause is draining (status=pausing) or parked
+    breakpoints: list[str] = Field(default_factory=list)  # stages to pause before
 
 
 class LogsResponse(BaseModel):
@@ -169,6 +217,7 @@ class SceneLine(BaseModel):
     speaker: str
     text: str
     delivery: str = ""
+    text_en: str | None = None  # English rendering of a Tamil line (UI only)
 
 
 class SceneShotView(BaseModel):
@@ -208,6 +257,7 @@ class StoryboardScene(BaseModel):
 
     order: int
     narration: str
+    narration_en: str | None = None  # English rendering of a Tamil caption (UI only)
     mode: str = "narration"  # narration | dialogue
     lines: list[SceneLine] = Field(default_factory=list)  # the screenplay lines (dialogue)
     shots: list[SceneShotView] = Field(default_factory=list)  # the scene's coverage, in order
@@ -246,6 +296,9 @@ class StoryboardContent(BaseModel):
     status: JobStatus
     title: str = ""
     logline: str = ""
+    # English renderings of a Tamil film's title/logline: the UI stays English.
+    title_en: str | None = None
+    logline_en: str | None = None
     style: str = ""
     story_style: str = "narrated"
     language: str = "en"

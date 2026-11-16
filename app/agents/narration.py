@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from app.adapters.errors import ProviderError
+from app.workers.control import PauseRequested, gate, paused
 from app.adapters.tts import silent_wav, wav_duration_seconds
 from app.agents.script_writer import WORDS_PER_SECOND
 from app.core.logging import get_logger
@@ -40,11 +41,15 @@ async def voice_lines(
     floor, pad = settings.narration_floor_seconds, settings.narration_pad_seconds
     out: list[SceneAudioMeta] = []
     warnings: list[str] = []
-    for order, text in items:
+    for i, (order, text) in enumerate(items):
         name = f"narration_{order:02d}.wav"
         if store.exists(name):
             wav = store.load_bytes(store.abspath(name))
         else:
+            try:
+                await gate(deps)  # each line is its own paid call
+            except PauseRequested:
+                raise paused("narration", i, len(items), "narration lines") from None
             try:
                 wav = await asyncio.to_thread(deps.tts.synthesize, text)
             except ProviderError as exc:

@@ -57,6 +57,7 @@ from app.schemas import (
     BriefView,
     FilmReviewView,
 )
+from app.workers.control import clear_pause
 from app.workers.runner import run_job
 
 router = APIRouter(prefix="/storyboard", tags=["storyboard"])
@@ -107,11 +108,17 @@ def _current_stage(stages) -> str | None:
 
 
 def _expires_at(job) -> datetime:
-    """When a job (and its artifacts) expire = created_at + the TTL."""
-    created = job.created_at
+    """When a job (and its artifacts) expire = created_at + the TTL. Paused films follow
+    the same rule unless ``paused_ttl_seconds`` is set (self-hosted), which counts from
+    the moment the film paused."""
+    settings = get_settings()
+    created, ttl = job.created_at, settings.job_ttl_seconds
+    if (job.status == JobStatus.PAUSED.value and job.updated_at is not None
+            and settings.paused_ttl_seconds is not None):
+        created, ttl = job.updated_at, settings.paused_ttl_seconds
     if created.tzinfo is None:  # SQLite can hand back a naive datetime
         created = created.replace(tzinfo=timezone.utc)
-    return created + timedelta(seconds=get_settings().job_ttl_seconds)
+    return created + timedelta(seconds=ttl)
 
 
 async def _load_live_job(session: AsyncSession, job_id: str):
@@ -254,9 +261,17 @@ async def resume_storyboard(
     ``try_acquire_job`` inside ``run_job``, so two racing resumes can't both run.
     """
     job = await _load_owned_job(session, job_id, user)
-    api_key = _request_key(request)
 
     status = JobStatus(job.status)
+    if status == JobStatus.PAUSING:
+        # Still draining in-flight units: withdraw the pause; the same runner (and the
+        # key it already holds) carries on, so no key is needed here.
+        if await repo.withdraw_pause(session, job_id):
+            clear_pause(job_id)
+            return JobCreatedResponse(job_id=job.id, status=JobStatus.RUNNING)
+        job = await _load_owned_job(session, job_id, user)  # it parked in the meantime
+        status = JobStatus(job.status)
+    api_key = _request_key(request)  # a new run starts below: BYOK needs the key again
     if status == JobStatus.RUNNING:
         raise HTTPException(status_code=409, detail="job is already running")
     if status in (JobStatus.COMPLETED, JobStatus.COMPLETED_WITH_WARNINGS):
@@ -315,6 +330,8 @@ async def get_storyboard(
         pipeline=pipeline_stage_names(get_settings()),
         stages=[_stage_ref(st) for st in stages],
         video_gap=_video_gap(job),
+        pause_requested=job.pause_requested_at is not None,
+        breakpoints=list(job.breakpoints or []),
         artifacts=[
             ArtifactRef(
                 id=a.id,
@@ -629,7 +646,7 @@ async def get_storyboard_content(
         )
         for c in script.get("characters", [])
     ]
-    return StoryboardContent(
+    content = StoryboardContent(
         job_id=job_id,
         status=JobStatus(job.status),
         title=script.get("title", ""),
@@ -661,6 +678,20 @@ async def get_storyboard_content(
         },
         scenes=scenes,
     )
+    return _with_english(content, _job_json("gloss.json"))
+
+
+def _with_english(content: StoryboardContent, gloss: dict) -> StoryboardContent:
+    """Attach the English rendering of each Tamil string (from gloss.json) for the UI."""
+    if not gloss:
+        return content
+    en = gloss.get
+    content.title_en, content.logline_en = en(content.title), en(content.logline)
+    for sc in content.scenes:
+        sc.narration_en = en(sc.narration)
+        for line in [*sc.lines, *(ln for sh in sc.shots for ln in sh.lines)]:
+            line.text_en = en(line.text)
+    return content
 
 
 @router.get("/{job_id}/publish", response_model=PublishKit)

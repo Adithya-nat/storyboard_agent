@@ -67,6 +67,21 @@ Every scene must be AI video. If Omni can't produce a clip (for example, the dai
 used up), the job stops instead of shipping stills; `POST /resume` finishes it later and reuses
 every clip already paid for.
 
+## Pause, resume and breakpoints
+
+Pausing never wastes a paid call. Once you pause, no new frame, scene clip, reference
+sheet or narration line starts. Calls already submitted finish and are kept, since
+they're billed either way. Then the job parks as `paused`. Every finished unit is on
+disk, and every stage skips what's on disk, so resuming continues from the first
+unfinished unit: if scene 3 of 6 was still waiting to start, the resume starts at
+scene 3. Resuming while a pause is still draining cancels the pause. Breakpoints pause
+right before a stage, for example to read the screenplay before paying for AI video.
+Paused films follow the 24-hour retention rule like any film; a self-hosted install can
+set `PAUSED_TTL_SECONDS` to keep a paused film longer, counted from when it paused.
+
+Tamil films stay Tamil on screen. The app UI stays English and shows an English
+rendering under each Tamil title and line: one cheap, cached text call (`gloss.json`).
+
 `make diagram` prints the graph as Mermaid straight from `app/graph/build.py`.
 
 ## Story styles and languages
@@ -87,7 +102,10 @@ GET  /storyboard/{id}/logs?stage=     per-stage log lines (paginated)
 GET  /storyboard/{id}/storyboard      script, cast, scenes, cover, cost
 GET  /storyboard/{id}/publish         post copy per platform
 GET  /storyboard/{id}/video           the mp4
-POST /storyboard/{id}/resume          continue a stopped/failed job (finished work is reused)
+POST /storyboard/{id}/resume          continue a stopped/failed/paused job (finished work is reused)
+POST /storyboard/{id}/pause           stop starting paid work; in-flight units finish, then it parks
+PUT  /storyboard/{id}/breakpoints     {"stages": [...]}: pause right BEFORE these stages
+GET  /storyboard/{id}/checkpoint      per-unit state (done / in flight / pending) + cost to finish
 GET  /budget  ·  /estimate  ·  /usage/summary  ·  /usage/runs  ·  /health
 GET  /me                              who is signed in, beta access, media-link token
 POST /keys/check                      which models a Gemini key can use (free)

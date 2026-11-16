@@ -17,6 +17,7 @@ from app.agents.assembler import assembler
 from app.agents.brief import brief
 from app.agents.dialogue_pass import dialogue_pass
 from app.agents.film_review import film_review
+from app.agents.gloss import ensure_for_script
 from app.agents.captions import captions
 from app.agents.designer import designer
 from app.agents.image_gen import image_gen
@@ -30,6 +31,7 @@ from app.agents.video_gen import video_gen
 from app.core.config import Settings
 from app.graph.state import Deps, StoryboardState
 from app.observability.context import bind_stage, reset_stage
+from app.workers.control import JobPaused
 
 
 def uses_video_stage(settings: Settings) -> bool:
@@ -67,6 +69,12 @@ def _node_for(name: str):
     }[name]
 
 
+# Run after a stage succeeds, inside it (so their cost is attributed to it). English
+# renderings of a Tamil film's text: once the script is final, and again after the
+# video stage, whose content-policy rewrites can change a line.
+_POST_HOOKS = {"reflection": ensure_for_script, "motion": ensure_for_script}
+
+
 def _instrument(name: str, seq: int, fn, reporter, deps=None):
     """Wrap a bound node with stage transitions + contextvar binding.
 
@@ -77,10 +85,19 @@ def _instrument(name: str, seq: int, fn, reporter, deps=None):
     if reporter is None:
         return fn
 
+    control = getattr(deps, "control", None) if deps is not None else None
+
     async def wrapped(state):
         job_id = state["job_id"]
         token = bind_stage(job_id, name)  # log attribution for this stage
         try:
+            # Stage boundary: honour a breakpoint on this stage, or a pause that landed
+            # after the previous stage's last unit, BEFORE anything here spends.
+            if control is not None:
+                if await control.take_breakpoint(name):
+                    raise JobPaused(name, "Stopped at your checkpoint, before this stage", breakpoint=True)
+                if await control.requested():
+                    raise JobPaused(name, "Paused before this stage started")
             await reporter.stage_start(job_id, name, seq)
             # QA toggle: raise inside the named stage so the failed + Resume UI is
             # testable (mock mode never fails on its own).
@@ -89,6 +106,8 @@ def _instrument(name: str, seq: int, fn, reporter, deps=None):
                     f"forced failure at stage '{name}' (QA: MOCK_FORCE_STAGE_FAILURE)"
                 )
             result = await fn(state)
+            if deps is not None and name in _POST_HOOKS:
+                await _POST_HOOKS[name]({**state, **(result if isinstance(result, dict) else {})}, deps)
             # Flip running -> succeeded ONLY if the node didn't already set a
             # terminal status (image_gen may mark itself 'degraded').
             await reporter.stage_finish(job_id, name)
@@ -98,6 +117,9 @@ def _instrument(name: str, seq: int, fn, reporter, deps=None):
             if publish is not None and isinstance(result, dict):
                 await publish(job_id, {**state, **result})
             return result
+        except JobPaused as p:
+            await reporter.stage_pause(job_id, name, seq, p.message)
+            raise  # the runner parks the job
         except Exception as exc:
             await reporter.stage_fail(job_id, name, exc)
             raise  # re-raise unchanged so the runner still sets the job FAILED

@@ -28,11 +28,13 @@ class Settings(BaseSettings):
     judge_model: str = "gemini-4-argon"     # NarrativeJudge (+ G1 audio/video judging)
     designer_model: str = "gemini-4-argon"  # shotlist / style bible / cast
     publish_model: str = "gemini-4-argon"   # publish kit (title, captions, hashtags)
+    gloss_model: str = ""                   # English renderings of Tamil text for the UI ("" = gemini_text_model)
     # Thinking depth per role (Gemini 3+/4: "low" | "medium" | "high"; "" = model default).
     script_thinking: str = "high"
     judge_thinking: str = "medium"
     designer_thinking: str = "medium"
     publish_thinking: str = "low"
+    gloss_thinking: str = "low"
     # Sampling temperature per role. None = don't send (Gemini 3+ recommend the default 1.0;
     script_temperature: float | None = None
     judge_temperature: float | None = None
@@ -163,6 +165,9 @@ class Settings(BaseSettings):
     # --- Job retention (TTL) ---
     # Product rule: everything a job makes is deleted 24h after creation.
     job_ttl_seconds: int = 86400
+    # Paused films follow the same rule by default (None). A self-hosted install may set
+    # this to keep a PAUSED film longer, counted from the moment it paused.
+    paused_ttl_seconds: int | None = None
     # The sweeper sleeps until the next job expires, at most this long (lets Neon scale to zero).
     job_sweep_interval_seconds: float = 3600.0
 

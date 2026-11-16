@@ -35,6 +35,7 @@ from pydantic import BaseModel
 from app.observability import usage
 from app.prompts import render
 from app.schemas import Shot, Shotlist
+from app.workers.control import PauseRequested, gate, paused, track
 
 log = get_logger(__name__)
 
@@ -70,6 +71,7 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
     clean_bytes: dict[int, bytes] = {}   # generated THIS run (un-captioned)
     reused_clean: set[int] = set()       # already clean on disk -> skipped, kept
     failures: dict[int, str] = {}
+    held: set[int] = set()  # frames a pause stopped before they were generated
     done = 0  # frames resolved (generated / reused / failed) -> drives progress
 
     async def attempt(shot: Shot) -> None:
@@ -84,17 +86,13 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
         else:
             async with sem:
                 try:
-                    raw = await asyncio.to_thread(
-                        deps.image.generate_image,
-                        prompt_for(shot),
-                        refs=refs_for(shot),
-                        seed=deps.settings.image_seed,
-                    )
-                    if await asyncio.to_thread(_identity_mismatch, deps, raw, shot.characters, sheets, cast_looks):
-                        log.info("frame %s: a character didn't match their reference; re-rendering once", shot.order)
-                        raw = await asyncio.to_thread(
-                            deps.image.generate_image, prompt_for(shot), refs=refs_for(shot), seed=deps.settings.image_seed
-                        )
+                    await gate(deps)  # a pause stops frames that haven't started
+                except PauseRequested:
+                    held.add(shot.order)
+                    return
+                try:
+                    with track(deps, "image_gen", shot.order):
+                        raw = await _render_shot(shot)
                     clean_bytes[shot.order] = raw
                     if reporter is not None:
                         reporter.log(f"frame {shot.order}/{total}: generated")
@@ -113,7 +111,31 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
         if reporter is not None:
             await reporter.progress(done, total)
 
+    async def _render_shot(shot: Shot) -> bytes:
+        raw = await asyncio.to_thread(
+            deps.image.generate_image,
+            prompt_for(shot),
+            refs=refs_for(shot),
+            seed=deps.settings.image_seed,
+        )
+        if await asyncio.to_thread(_identity_mismatch, deps, raw, shot.characters, sheets, cast_looks):
+            log.info("frame %s: a character didn't match their reference; re-rendering once", shot.order)
+            raw = await asyncio.to_thread(
+                deps.image.generate_image, prompt_for(shot), refs=refs_for(shot), seed=deps.settings.image_seed
+            )
+        return raw
+
     await asyncio.gather(*(attempt(s) for s in shots))
+
+    if held:
+        # Keep every frame finished before the pause (clean, no degraded marker). Failed
+        # frames are NOT neighbour-filled here: resume retries them for real.
+        for order, raw in clean_bytes.items():
+            store.save_bytes(f"frame_{order:02d}.png", raw)
+            store.remove(f"frame_{order:02d}.degraded")
+        kept = len(clean_bytes) + len(reused_clean)
+        log.info("frames paused: %d/%d kept; resume starts at frame %d", kept, total, min(held))
+        raise paused("image_gen", kept, total, "frames")
 
     # QA toggle: force one degraded frame so the completed_with_warnings UI is
     # testable (mock mode otherwise only ever yields clean frames). Treat the first

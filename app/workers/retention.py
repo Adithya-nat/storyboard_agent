@@ -20,7 +20,7 @@ MIN_SLEEP = 60.0
 async def sweep_once(settings: Settings) -> float:
     """Purge expired jobs (rows, files, graph checkpoints); return seconds until the next expiry."""
     async with get_sessionmaker()() as session:
-        expired = await repo.delete_expired_jobs(session, settings.job_ttl_seconds)
+        expired = await repo.delete_expired_jobs(session, settings.job_ttl_seconds, settings.paused_ttl_seconds)
     for job_id in expired:
         shutil.rmtree(Path(settings.artifact_root) / job_id, ignore_errors=True)
     if expired:

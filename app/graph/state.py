@@ -35,6 +35,7 @@ from app.adapters.tts import GeminiTTSAdapter
 from app.artifacts.store import ArtifactStore
 from app.core.config import Settings
 from app.observability.reporter import ProgressReporter
+from app.workers.control import RunControl
 
 
 class FrameMeta(TypedDict):
@@ -166,6 +167,8 @@ class Deps:
     transcriber: TranscribeAdapter | None = None
     music: LyriaMusicAdapter | None = None
     video: OmniVideoAdapter | None = None  # AI video (None => scenes keep stills)
+    # Pause/breakpoint handle (None => the run can't be paused, e.g. unit tests).
+    control: RunControl | None = None
     allow_stills: bool = False  # user chose to finish with stills for scenes that have no clip
 
     def frame_count(self, duration: int, style: str = "narrated") -> int:

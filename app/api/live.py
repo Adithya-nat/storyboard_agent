@@ -31,6 +31,7 @@ class LiveBeat(BaseModel):
     order: int
     text: str
     speaker: str | None = None
+    text_en: str | None = None  # English rendering of a Tamil beat (UI only)
 
 
 class LiveCast(BaseModel):
@@ -62,6 +63,8 @@ class LiveAssets(BaseModel):
     version: str
     title: str | None = None
     logline: str | None = None
+    title_en: str | None = None    # English renderings for a Tamil film (UI stays English)
+    logline_en: str | None = None
     beats: list[LiveBeat] = Field(default_factory=list)
     scores: dict[str, int] = Field(default_factory=dict)
     score_overall: int | None = None
@@ -89,7 +92,7 @@ def _read_json(art) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _beats(script: dict) -> list[LiveBeat]:
+def _beats(script: dict, gloss: dict | None = None) -> list[LiveBeat]:
     out: list[LiveBeat] = []
     for sc in script.get("scenes") or []:
         if not isinstance(sc, dict) or not isinstance(sc.get("order"), int):
@@ -103,7 +106,9 @@ def _beats(script: dict) -> list[LiveBeat]:
         if not text:
             text = (sc.get("description") or "").strip()
         if text:
-            out.append(LiveBeat(order=sc["order"], text=text[:240], speaker=speaker))
+            en = (gloss or {}).get(text)
+            out.append(LiveBeat(order=sc["order"], text=text[:240], speaker=speaker,
+                                text_en=en[:240] if isinstance(en, str) else None))
     return sorted(out, key=lambda b: b.order)
 
 
@@ -178,12 +183,16 @@ async def get_live_assets(
         p = portraits.get(name.upper()[:26])
         cast.append(LiveCast(name=name, portrait_url=_artifact_url(job_id, p.id) if p else None))
 
+    gloss = job_json("gloss.json")
+    title, logline = script.get("title") or None, script.get("logline") or None
     return LiveAssets(
         job_id=job_id,
         version=assets_version(arts),
-        title=(script.get("title") or None),
-        logline=(script.get("logline") or None),
-        beats=_beats(script),
+        title=title,
+        logline=logline,
+        title_en=gloss.get(title) if title else None,
+        logline_en=gloss.get(logline) if logline else None,
+        beats=_beats(script, gloss),
         scores=scores,
         score_overall=overall,
         style_ref_url=url("style_ref"),

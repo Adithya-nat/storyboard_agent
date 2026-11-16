@@ -72,6 +72,10 @@ class Job(Base):
     style: Mapped[str] = mapped_column(String(16), nullable=False, default="narrated")
     language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # None = local mode
+    # Run controls: set while a pause is requested (draining) and cleared when the job
+    # parks or the pause is withdrawn. ``breakpoints`` = stages to pause BEFORE.
+    pause_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    breakpoints: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now

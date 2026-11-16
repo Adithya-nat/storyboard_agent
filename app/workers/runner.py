@@ -2,6 +2,10 @@
 
 Atomic acquire -> run graph (checkpointer when available) -> persist artifacts, status,
 tokens, spend and the run-ledger row. Resume re-runs idempotent nodes cheaply.
+
+Pause: a stage raises ``JobPaused`` once its in-flight paid units have drained (see
+app/workers/control.py). The runner then parks the job as ``paused``, unless the pause
+was withdrawn while draining, in which case it carries straight on from the same spot.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from app.graph.state import Deps
 from app.observability.reporter import ProgressReporter
 from app.observability.usage import UsageCollector, bind_collector, reset_collector
 from app.schemas import JobStatus
+from app.workers.control import JobPaused, RunControl, clear_pause, forget
 
 log = get_logger(__name__)
 
@@ -82,6 +87,7 @@ async def _run_job(
     if not acquired:
         log.warning("job %s already running; runner aborting (concurrent resume?)", job_id)
         return
+    clear_pause(job_id)  # a fresh/resumed run starts unpaused (the DB flag was cleared on acquire)
 
     # Token accounting: bind a collector for THIS job BEFORE the graph runs, so every
     # context copied by asyncio.gather/to_thread (the parallel image calls) shares it.
@@ -118,6 +124,7 @@ async def _run_job(
                 else None,
                 video=OmniVideoAdapter(settings) if settings.video_provider == "omni" and allow_motion else None,
                 allow_stills=allow_stills,
+                control=RunControl(job_id, sessionmaker),
             )
             config = {"configurable": {"thread_id": job_id}}
             init = {
@@ -141,7 +148,7 @@ async def _run_job(
                     )
                     checkpointer = None
                 graph = build_graph(deps, checkpointer=checkpointer)
-                final = await _invoke(
+                final, paused = await _drive(
                     graph, init, config, resume, checkpointed=checkpointer is not None
                 )
         except Exception as exc:  # noqa: BLE001 - any failure -> visible FAILED status
@@ -154,11 +161,41 @@ async def _run_job(
                 )
             await _finish_ledger(job_id, {}, collector, "failed", started)
             return
+        if paused is not None:
+            async with sessionmaker() as session:
+                await _persist_tokens(session, job_id, collector)
+            await _finish_ledger(job_id, {}, collector, JobStatus.PAUSED.value, started)
+            log.info("job %s paused at %s: %s", job_id, paused.stage, paused.message)
+            return
     finally:
         reset_collector(usage_token)
+        forget(job_id)
 
     status = await _persist(job_id, final, collector)
     await _finish_ledger(job_id, final, collector, status, started)
+
+
+async def _drive(
+    graph, init: dict, config: dict, resume: bool, *, checkpointed: bool
+) -> tuple[dict, JobPaused | None]:
+    """Run the graph; on a pause, park the job. Returns (final_state, pause_or_None).
+
+    If the pause was withdrawn while in-flight units drained, ``park_job`` refuses
+    (the flag is gone) and we simply continue: as a resume, so finished nodes and
+    units are skipped and nothing is re-billed.
+    """
+    job_id = init["job_id"]
+    for _ in range(20):  # bounded: a withdraw/re-pause tug-of-war can't spin forever
+        try:
+            return await _invoke(graph, init, config, resume, checkpointed=checkpointed), None
+        except JobPaused as paused:
+            async with get_sessionmaker()() as session:
+                if await repo.park_job(session, job_id):
+                    return {}, paused
+            clear_pause(job_id)
+            log.info("job %s: pause withdrawn while draining; continuing from %s", job_id, paused.stage)
+            resume = True
+    raise RuntimeError("pause/resume toggled too many times in one run; resume it again")
 
 
 async def _invoke(graph, init: dict, config: dict, resume: bool, *, checkpointed: bool) -> dict:
