@@ -24,7 +24,7 @@ VOICE_NAME ?= Creator Agent narrator
 .PHONY: help setup install install-web env db-up db-down db-logs db-shell migrate db-reset \
         dev api api-reload web web-prod stop status health budget open logs \
         doctor doctor-live voice test test-cov test-live test-web typecheck lint build-web check \
-        evals evals-mock probe-g1 host-up host-down host-status host-logs bakeoff-images bakeoff-scripts diagram clean clean-artifacts
+        evals evals-mock probe-g1 host-up host-down host-idle host-status host-logs bakeoff-images bakeoff-scripts diagram clean clean-artifacts
 
 ##@ Getting started
 help: ## Show this list
@@ -170,14 +170,20 @@ diagram: ## Print the pipeline diagram (Mermaid) for the README
 HOST := docker compose -p creator-agent-host -f deploy/compose.prod.yml -f deploy/compose.laptop.yml --env-file deploy/.env
 TAILSCALE ?= $(or $(shell command -v tailscale),/Applications/Tailscale.app/Contents/MacOS/Tailscale)
 
-host-up: ## Build + start the hosted API and web app, then publish them with Funnel
+host-up: ## Build + start the hosted copy and publish it (refuses mid-film unless FORCE=1)
+	@$(MAKE) --no-print-directory host-idle
 	$(HOST) up -d --build api web
 	$(TAILSCALE) funnel --bg --https=443 http://127.0.0.1:3300
 	$(TAILSCALE) funnel --bg --https=8443 http://127.0.0.1:8300
 
-host-down: ## Stop the hosted copy and take it off the internet (interrupts running films)
+host-down: ## Stop the hosted copy and take it offline (refuses mid-film unless FORCE=1)
+	@$(MAKE) --no-print-directory host-idle
 	-$(TAILSCALE) funnel reset
 	$(HOST) down
+
+host-idle: ## Fail if a film is rendering on the hosted copy (FORCE=1 skips)
+	@if [ "$(FORCE)" != "1" ] && $(HOST) ps --status running --services 2>/dev/null | grep -qx api; then \
+	  $(HOST) exec -T api python -m app.workers.active_count; fi
 
 host-status: ## Containers, health and what Funnel publishes
 	@$(HOST) ps --format '{{.Service}}: {{.Status}}'
