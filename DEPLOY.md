@@ -184,8 +184,18 @@ Coolify runs its own proxy for HTTPS, so don't also start the Caddy service.
 - **Any small VPS** (Hetzner, DigitalOcean and similar, about $5/month): Option A works
   unchanged. Use 2+ cores and 4 GB+ RAM; ffmpeg is the heavy part.
 - **A spare computer at home** with [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
-  (`cloudflared` is open source): no open ports needed. Point the tunnel's two hostnames at
-  `localhost:3000` and `localhost:8000`, and skip Caddy.
+  (`cloudflared` is open source): no open ports needed. The compose file doesn't publish the app
+  ports, so add the loopback-only override in `deploy/compose.tunnel.yml`:
+
+  ```yaml
+  services:
+    api: { ports: ["127.0.0.1:8000:8000"] }
+    web: { ports: ["127.0.0.1:3000:3000"] }
+  ```
+
+  Start with `docker compose -f deploy/compose.prod.yml -f deploy/compose.tunnel.yml --env-file deploy/.env up -d --build api web`
+  (leaving Caddy out), then point the tunnel's two hostnames at `http://localhost:3000` and
+  `http://localhost:8000`. Binding to `127.0.0.1` keeps the ports off your network.
 - **Web app on Vercel Hobby** (free, not open source, non-commercial only): set the same env
   vars and keep the API on your server.
 
@@ -213,7 +223,7 @@ API (`creator-agent`). In hosted mode, `deploy/compose.prod.yml` sets these from
 | `CORS_ORIGINS` | `http://localhost:3000` | `https://app.<domain>` | |
 | `USER_MONTHLY_BUDGET_USD` | 50 | 50 | Per-user cap on estimated spend |
 | `MAX_ACTIVE_JOBS_PER_USER` / `MAX_ACTIVE_JOBS` | 1 / 3 | same | Films rendering at once (hosted only) |
-| `JOB_TTL_SECONDS` | 86400 | 86400 (maximum) | Everything is deleted this long after a film starts |
+| `JOB_TTL_SECONDS` | 86400 | 86400 (maximum) | A film's prompt, script, media and logs are deleted this long after it starts; cost totals stay |
 | `ARTIFACT_ROOT` | `./artifacts_store` | `/data/artifacts` | Where films live until they're deleted |
 
 Web app (`creator-agent-web`):

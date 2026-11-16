@@ -107,7 +107,7 @@
     size();
     addEventListener("resize", size);
 
-    let mx = 0.5, tx = 0.5, raf = 0, running = false;
+    let mx = 0.5, tx = 0.5, raf = 0, running = false, inView = false;
     const start = performance.now() - Math.random() * 20000;
     addEventListener("pointermove", (e) => (tx = e.clientX / innerWidth), { passive: true });
     const frame = (now) => {
@@ -117,10 +117,10 @@
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       raf = running ? requestAnimationFrame(frame) : 0;
     };
-    const play = () => { if (!running && !document.hidden) { running = true; raf = requestAnimationFrame(frame); } };
+    const play = () => { if (!running && inView && !document.hidden) { running = true; raf = requestAnimationFrame(frame); } };
     const stop = () => { running = false; cancelAnimationFrame(raf); };
     if (reduce) { gl.uniform1f(ut, 12); gl.uniform2f(um, 0.5, 0.5); gl.drawArrays(gl.TRIANGLES, 0, 3); return; }
-    whenVisible(canvas, play, stop, 0);
+    whenVisible(canvas, () => { inView = true; play(); }, () => { inView = false; stop(); }, 0);
     document.addEventListener("visibilitychange", () => (document.hidden ? stop() : play()));
   }
   $$("[data-beam]").forEach(beam);

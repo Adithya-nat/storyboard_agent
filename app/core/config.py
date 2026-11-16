@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -263,8 +264,8 @@ class Settings(BaseSettings):
         """Allow list settings as CSV ('a,b') in addition to a JSON list."""
         if isinstance(v, str):
             s = v.strip()
-            if s.startswith("["):  # JSON -> let pydantic handle it
-                return v
+            if s.startswith("["):  # JSON list (NoDecode means we decode it here)
+                return json.loads(s)
             return [o.strip() for o in s.split(",") if o.strip()]
         return v
 
@@ -331,8 +332,8 @@ def normalize_database_url(url: str) -> str:
     for k, val in parse_qsl(parts.query):
         if k == "channel_binding":
             continue
-        if k == "sslmode":
-            k, val = "ssl", ("require" if val in ("require", "verify-ca", "verify-full", "prefer") else val)
+        if k == "sslmode":  # asyncpg's ssl= takes the same modes; keep the verification level
+            k = "ssl"
         query.append((k, val))
     return urlunsplit(("postgresql+asyncpg", parts.netloc, parts.path, urlencode(query), parts.fragment))
 

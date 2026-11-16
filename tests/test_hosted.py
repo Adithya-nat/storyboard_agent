@@ -291,6 +291,59 @@ def test_hosted_settings_cap_retention():
         Settings(auth_mode="jwt")
 
 
+async def test_resume_respects_the_active_film_limit(hosted, client, captured):
+    running = await _job(user_id="u1")
+    stopped = await _job(user_id="u1")
+    async with get_sessionmaker()() as s:
+        await repo.set_status(s, running.id, JobStatus.RUNNING)
+        await repo.set_status(s, stopped.id, JobStatus.FAILED, error="x")
+    r = await client.post(f"/storyboard/{stopped.id}/resume", headers=bearer())
+    assert r.status_code == 429 and not captured
+
+
+async def test_concurrent_creates_admit_only_one(hosted, client, captured):
+    import asyncio
+
+    body = {"prompt": "a robot", "duration": 30}
+    codes = sorted(r.status_code for r in await asyncio.gather(
+        *(client.post("/storyboard", json=body, headers=bearer()) for _ in range(4))))
+    assert codes == [202, 429, 429, 429]
+
+
+async def test_sweep_retries_leftover_files_and_checkpoints(tmp_path, monkeypatch):
+    s = get_settings()
+    monkeypatch.setattr(s, "artifact_root", tmp_path)
+    live = await _job()
+    gone = "0b0b0b0b-0000-4000-8000-000000000000"
+    for jid in (live.id, gone):
+        (tmp_path / jid).mkdir()
+    (tmp_path / "_omni_ops").mkdir()
+    with sqlite3.connect(tmp_path / "checkpoints.sqlite") as c:
+        c.execute("CREATE TABLE checkpoints (thread_id TEXT)")
+        c.executemany("INSERT INTO checkpoints VALUES (?)", [(live.id,), (gone,), (f"{gone}:r:1",)])
+    await retention.sweep_once(s)
+    assert (tmp_path / live.id).exists() and not (tmp_path / gone).exists() and (tmp_path / "_omni_ops").exists()
+    with sqlite3.connect(tmp_path / "checkpoints.sqlite") as c:
+        assert [r[0] for r in c.execute("SELECT thread_id FROM checkpoints")] == [live.id]
+
+
+def test_allowlist_accepts_json_or_csv(monkeypatch):
+    from app.core.config import Settings
+
+    monkeypatch.setenv("ALLOWED_USERS", '["a@x.com", "@team.dev"]')
+    assert Settings().allowed_users == ["a@x.com", "@team.dev"]
+    monkeypatch.setenv("ALLOWED_USERS", "a@x.com, @team.dev")
+    assert Settings().allowed_users == ["a@x.com", "@team.dev"]
+
+
+def test_tls_verification_mode_is_kept():
+    from app.core.config import normalize_database_url
+    from app.graph.checkpoint import _psycopg_url
+
+    url = normalize_database_url("postgresql://u:p@h/db?sslmode=verify-full")
+    assert url.endswith("?ssl=verify-full") and _psycopg_url(url).endswith("?sslmode=verify-full")
+
+
 def test_neon_url_is_normalized():
     from app.core.config import normalize_database_url
 

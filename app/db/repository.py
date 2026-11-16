@@ -331,7 +331,17 @@ async def next_expiry(session: AsyncSession, ttl_seconds: int) -> datetime | Non
     return oldest + timedelta(seconds=ttl_seconds)
 
 
-ACTIVE = (JobStatus.QUEUED.value, JobStatus.RUNNING.value)
+ACTIVE = (JobStatus.QUEUED.value, JobStatus.RUNNING.value, JobStatus.PAUSING.value)
+
+
+async def job_ids(session: AsyncSession) -> set[str]:
+    return set((await session.execute(select(Job.id))).scalars().all())
+
+
+async def mark_queued(session: AsyncSession, job_id: str) -> None:
+    """Admitted for a (re)run: counts toward the active-film limits until its runner starts."""
+    await session.execute(update(Job).where(Job.id == job_id).values(status=JobStatus.QUEUED.value))
+    await session.commit()
 
 
 async def count_active_jobs(session: AsyncSession, user_id: str | None = None) -> int:

@@ -144,6 +144,20 @@ async def _load_owned_job(session: AsyncSession, job_id: str, user: User):
     return job
 
 
+# Films run in this one process, so one lock makes "check the limits, then admit" atomic.
+_admission = asyncio.Lock()
+
+
+async def _check_active_limits(session: AsyncSession, user: User) -> None:
+    settings = get_settings()
+    if not settings.hosted:
+        return
+    if await repo.count_active_jobs(session, user.scope) >= settings.max_active_jobs_per_user:
+        raise HTTPException(status_code=429, detail="You already have a film rendering. Wait for it to finish.")
+    if await repo.count_active_jobs(session) >= settings.max_active_jobs:
+        raise HTTPException(status_code=429, detail="The studio is busy right now. Try again in a few minutes.")
+
+
 def _request_key(request: Request) -> str | None:
     """The tester's Gemini key from X-Gemini-Key (BYOK). Held in memory for the run only."""
     settings = get_settings()
@@ -189,11 +203,13 @@ async def create_storyboard(
         raise HTTPException(status_code=403, detail="Turnstile verification failed")
     settings = get_settings()
     api_key = _request_key(request)
-    if settings.hosted:
-        if await repo.count_active_jobs(session, user.scope) >= settings.max_active_jobs_per_user:
-            raise HTTPException(status_code=429, detail="You already have a film rendering. Wait for it to finish.")
-        if await repo.count_active_jobs(session) >= settings.max_active_jobs:
-            raise HTTPException(status_code=429, detail="The studio is busy right now. Try again in a few minutes.")
+    async with _admission:
+        return await _admit_new(session, background, body, user, api_key)
+
+
+async def _admit_new(session, background, body, user: User, api_key: str | None) -> JobCreatedResponse:
+    settings = get_settings()
+    await _check_active_limits(session, user)
     style = body.style or settings.default_style
     language = body.language or settings.default_language
     if language == "ta" and settings.require_raqm_for_tamil and not raqm_available():
@@ -281,6 +297,9 @@ async def resume_storyboard(
         )
 
     allow_stills = bool(body and body.allow_stills)
+    async with _admission:
+        await _check_active_limits(session, user)
+        await repo.mark_queued(session, job.id)
     background.add_task(run_job, job.id, job.prompt, job.duration, True, job.style, job.language,
                         allow_stills=allow_stills, api_key=api_key, user_id=job.user_id)
     return JobCreatedResponse(job_id=job.id, status=JobStatus.RUNNING)

@@ -127,3 +127,31 @@ async def purge_checkpoints(settings: Settings, job_ids: list[str]) -> int:
 
         return await asyncio.to_thread(_purge)
     return 0
+
+
+async def checkpoint_job_ids(settings: Settings) -> set[str]:
+    """Job ids that still have saved graph state (resume threads collapse to their job)."""
+    url = settings.database_url
+    threads: list[str] = []
+    if url.startswith("postgresql"):
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(_psycopg_url(url), autocommit=True) as conn:
+            for table in _PG_TABLES:
+                exists = await (await conn.execute("SELECT to_regclass(%s)", (table,))).fetchone()
+                if exists and exists[0] is not None:
+                    rows = await (await conn.execute(f"SELECT DISTINCT thread_id FROM {table}")).fetchall()
+                    threads += [r[0] for r in rows]
+    elif url.startswith("sqlite"):
+        import asyncio
+        import sqlite3
+
+        path = settings.artifact_root / "checkpoints.sqlite"
+        if path.exists():
+            def _list() -> list[str]:
+                with sqlite3.connect(path) as conn:
+                    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    return [r[0] for t in _SQLITE_TABLES if t in tables
+                            for r in conn.execute(f"SELECT DISTINCT thread_id FROM {t}")]
+            threads = await asyncio.to_thread(_list)
+    return {t.split(":", 1)[0] for t in threads if t}
