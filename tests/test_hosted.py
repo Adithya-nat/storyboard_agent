@@ -201,15 +201,19 @@ def test_limiters_are_per_key():
     assert mine is not shared and rate_limit.get_text_limiter(25) is shared
 
 
-def test_mock_mode_never_calls_google(monkeypatch):
+def test_mock_mode_never_calls_google(monkeypatch, tmp_path):
+    from app.adapters import omni
     from app.adapters.genai_client import make_client
-    from app.adapters.omni import OmniVideoAdapter, ProviderError
+    from app.core.images import render_card
 
     s = get_settings().model_copy(update={"gemini_api_key": KEY, "use_mock_providers": True})
     with pytest.raises(RuntimeError):
         make_client(s)
-    with pytest.raises(ProviderError):
-        OmniVideoAdapter(s).generate(b"img", SimpleNamespace(), key="k")
+    # Mock AI video is a local still-clip: free, and no client is ever built.
+    monkeypatch.setattr(omni, "make_client", lambda *a, **k: pytest.fail("mock mode built a Gemini client"))
+    clip = omni.OmniVideoAdapter(s, journal_dir=tmp_path).generate(
+        render_card("x"), omni.SceneSpec(order=1, scene="x", seconds=3.0), key="k")
+    assert clip.cost_usd == 0.0 and clip.model == "mock-omni"
 
 
 def test_log_filter_redacts_keys():

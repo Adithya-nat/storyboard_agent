@@ -331,3 +331,42 @@ async def test_storyboard_content_carries_english_renderings(client, artifact_ro
 
     body = (await client.get(f"/storyboard/{job.id}/storyboard")).json()
     assert body["title"] == "கடைசி பஸ்" and body["title_en"] == "The last bus"
+
+
+# --- Hosted mode: run controls are per-user ---------------------------------- #
+async def test_controls_hide_another_users_film(client, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.core import auth
+    from app.core.config import get_settings
+    from tests import test_hosted as h
+
+    live = get_settings()
+    for k, v in {"auth_mode": "jwt", "auth_jwks_url": "http://web.test/api/auth/jwks", "auth_issuer": h.ISS,
+                 "allowed_users": ["ada@example.com", "bob@example.com"], "asset_signing_secret": "s" * 32}.items():
+        monkeypatch.setattr(live, k, v)
+    monkeypatch.setattr(auth, "_jwks_client", lambda url: SimpleNamespace(
+        get_signing_key_from_jwt=lambda t: SimpleNamespace(key=h._PRIV.public_key())))
+
+    async with get_sessionmaker()() as sess:
+        job = await repo.create_job(sess, "p", 30, user_id="ada")
+        await repo.set_status(sess, job.id, JobStatus.RUNNING)
+    bob = h.bearer(sub="bob", email="bob@example.com")
+    assert (await client.post(f"/storyboard/{job.id}/pause", headers=bob)).status_code == 404
+    assert (await client.get(f"/storyboard/{job.id}/checkpoint", headers=bob)).status_code == 404
+    r = await client.put(f"/storyboard/{job.id}/breakpoints", json={"stages": []}, headers=bob)
+    assert r.status_code == 404
+    ada = h.bearer(sub="ada", email="ada@example.com")
+    assert (await client.post(f"/storyboard/{job.id}/pause", headers=ada)).status_code == 202
+    control.forget(job.id)
+
+
+def test_mock_omni_makes_a_local_clip_without_the_network(tmp_path):
+    from app.adapters.omni import OmniVideoAdapter, SceneSpec
+    from app.core.images import render_card
+
+    s = Settings(gemini_api_key="", use_mock_providers=True)
+    adapter = OmniVideoAdapter(s, journal_dir=tmp_path)
+    adapter._client = None  # any client use would go through make_client(), which refuses in mock mode
+    clip = adapter.generate(render_card("x"), SceneSpec(order=1, scene="x", seconds=3.0), key="k")
+    assert clip.data[4:8] == b"ftyp" and clip.cost_usd == 0.0 and clip.model == "mock-omni"
