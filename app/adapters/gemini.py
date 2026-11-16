@@ -91,6 +91,10 @@ class GeminiImageAdapter:
         ``ref_image`` is the legacy single-reference form and is prepended to ``refs``."""
         if self.settings.mock_mode:
             log.info("GeminiImageAdapter mock_mode -> card")
+            if self.settings.mock_unit_delay_seconds > 0:
+                import time
+
+                time.sleep(self.settings.mock_unit_delay_seconds)
             if self.settings.mock_token_usage:
                 usage.record(total=self.settings.mock_token_usage)
             return render_card(prompt, caption)
