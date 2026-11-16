@@ -118,6 +118,11 @@ class RunControl:
         # A pause signalled while the DB read was in flight still counts.
         return self._db_flag or _event(self.job_id).is_set()
 
+    def reset(self) -> None:
+        """Forget the cached DB answer (a withdrawn pause): the next check reads it afresh."""
+        self._db_flag = False
+        self._checked = 0.0
+
     async def gate(self) -> None:
         if await self.requested():
             raise PauseRequested()

@@ -455,3 +455,110 @@ async def test_a_failed_narration_line_is_retried_after_a_pause(artifact_root):
     await voice_lines([(1, "one"), (2, "two"), (3, "three")], deps)
     assert calls == ["one", "two", "one", "three"]  # line 1 retried for real; line 2 not re-billed
     assert not deps.store.exists("narration_01.failed")
+
+
+# --- Review fixes, round 2 (CodeRabbit re-review on creator-agent#3) --------- #
+def test_hosted_mode_rejects_a_longer_paused_retention():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="PAUSED_TTL_SECONDS"):
+        Settings(auth_mode="jwt", auth_jwks_url="http://web.test/jwks", paused_ttl_seconds=7 * 86400)
+    assert Settings(auth_mode="none", paused_ttl_seconds=7 * 86400).paused_ttl_seconds  # self-host opt-in
+
+
+async def test_the_sweeper_never_deletes_a_film_that_started_after_its_scan():
+    from app.db.repository import _purge_expired
+
+    job_id = await _job(JobStatus.FAILED)
+    async with get_sessionmaker()() as s:
+        candidates = [job_id]  # the scan saw it failed and expired...
+        assert await repo.mark_queued(s, job_id)  # ...then a resume admitted it
+        assert await repo.try_acquire_job(s, job_id)  # ...and its runner started
+        assert await _purge_expired(s, candidates) == []  # re-checked under the lock: kept
+        assert (await repo.get_job(s, job_id)).status == JobStatus.RUNNING.value
+        await repo.set_status(s, job_id, JobStatus.FAILED)
+        assert await _purge_expired(s, candidates) == [job_id]  # not running: the 24h rule applies
+
+
+async def test_a_parking_runner_finishes_its_writes_before_the_job_is_resumable(stub_video, monkeypatch):
+    from app.workers import runner
+
+    order: list[str] = []
+    real_park, real_ledger = repo.park_job, runner._finish_ledger
+
+    async def park(session, job_id):
+        order.append("park")
+        return await real_park(session, job_id)
+
+    async def ledger(*a, **k):
+        order.append(f"ledger:{a[3]}")
+        return await real_ledger(*a, **k)
+
+    monkeypatch.setattr("app.db.repository.park_job", park)
+    monkeypatch.setattr(runner, "_finish_ledger", ledger)
+    async with get_sessionmaker()() as s:
+        job = await repo.create_job(s, "a quiet harbour at dawn", 30)
+        await repo.set_breakpoints(s, job.id, ["image_gen"])
+    await runner.run_job(job.id, job.prompt, 30)
+    assert order == ["ledger:paused", "park"]  # nothing of the old run lands after parking
+
+
+async def test_a_withdrawn_pause_does_not_re_pause_from_the_cached_flag():
+    from app.workers.runner import _drive
+
+    job_id = await _job(JobStatus.RUNNING)  # running, no pause flag: park_job refuses
+    ctl = RunControl(job_id, get_sessionmaker(), poll_seconds=3600)
+    ctl._db_flag, ctl._checked = True, time.monotonic()  # cached "paused" from before the withdraw
+    seen: list[bool] = []
+
+    class _Graph:
+        calls = 0
+
+        async def ainvoke(self, init, config=None):
+            _Graph.calls += 1
+            if _Graph.calls == 1:
+                raise JobPaused("motion", "paused")
+            seen.append(await ctl.requested())
+            return {"ok": True}
+
+    final, paused = await _drive(_Graph(), {"job_id": job_id}, {}, False, checkpointed=False, control=ctl)
+    assert paused is None and final == {"ok": True}
+    assert seen == [False]  # the cache was reset: the next check read the DB
+    control.forget(job_id)
+
+
+async def test_the_failure_marker_survives_a_failed_save_of_the_retried_line(artifact_root, monkeypatch):
+    from app.adapters.errors import ProviderError
+    from app.adapters.llm import LLMAdapter
+    from app.adapters.tts import silent_wav
+    from app.agents.narration import voice_lines
+    from app.artifacts.store import ArtifactStore
+    from app.graph.state import Deps
+
+    s = Settings(gemini_api_key="", use_mock_providers=True)
+    tries: list[int] = []
+
+    class _TTS:
+        def synthesize(self, text):
+            tries.append(1)
+            if len(tries) == 1:
+                raise ProviderError("tts down")
+            return silent_wav(2.0)
+
+    store = ArtifactStore(artifact_root, "narr-2")
+    deps = Deps(settings=s, store=store, llm=LLMAdapter(s), image=None, tts=_TTS())
+    await voice_lines([(1, "one")], deps)  # fails: silence + marker
+    assert store.exists("narration_01.failed")
+
+    real_save = store.save_bytes
+
+    def broken_save(name, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "save_bytes", broken_save)
+    with pytest.raises(OSError):
+        await voice_lines([(1, "one")], deps)  # the retry works, but saving it fails
+    assert store.exists("narration_01.failed")  # so the silence is still marked for a retry
+    monkeypatch.setattr(store, "save_bytes", real_save)
+    await voice_lines([(1, "one")], deps)
+    assert not store.exists("narration_01.failed") and len(tries) == 3

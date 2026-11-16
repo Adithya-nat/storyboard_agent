@@ -220,8 +220,10 @@ async def set_breakpoints(session: AsyncSession, job_id: str, stages: list[str])
 
 
 async def consume_breakpoint(session: AsyncSession, job_id: str, stage: str) -> bool:
-    """If ``stage`` is a breakpoint: remove it and raise the pause flag (one transaction)."""
-    bps = await session.scalar(select(Job.breakpoints).where(Job.id == job_id)) or []
+    """If ``stage`` is a breakpoint: remove it and raise the pause flag (one transaction).
+    The row is locked while it's read and rewritten, so a concurrent ``set_breakpoints``
+    waits and then lands on top instead of being overwritten by this stale list."""
+    bps = await session.scalar(select(Job.breakpoints).where(Job.id == job_id).with_for_update()) or []
     if stage not in bps:
         return False
     await session.execute(
@@ -310,6 +312,22 @@ async def delete_expired_jobs(
         if now - created >= timedelta(seconds=ttl):
             expired.append(job_id)
     if not expired:
+        return []
+    return await _purge_expired(session, expired)
+
+
+async def _purge_expired(session: AsyncSession, candidates: list[str]) -> list[str]:
+    """Delete expired candidates, re-checked under a row lock.
+
+    A resume may have started a candidate after the scan above read its status. Locking
+    the rows and re-checking means either the runner acquired first (the row is now
+    running, so it is skipped) or the sweeper did (``try_acquire_job`` waits on the lock,
+    then finds no row and the runner aborts). A running film is never deleted."""
+    expired = list((await session.execute(
+        select(Job.id).where(Job.id.in_(candidates), Job.status.not_in(_ACTIVE)).with_for_update()
+    )).scalars().all())
+    if not expired:
+        await session.commit()
         return []
     await session.execute(delete(JobLog).where(JobLog.job_id.in_(expired)))
     await session.execute(delete(JobStage).where(JobStage.job_id.in_(expired)))

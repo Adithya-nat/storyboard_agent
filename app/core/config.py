@@ -286,6 +286,8 @@ class Settings(BaseSettings):
                 raise ValueError("AUTH_MODE=jwt needs AUTH_JWKS_URL")
             if self.job_ttl_seconds > 86400:
                 raise ValueError("hosted mode keeps jobs for at most 24 hours (JOB_TTL_SECONDS <= 86400)")
+            if self.paused_ttl_seconds is not None:
+                raise ValueError("hosted mode keeps paused films to the same 24-hour rule (unset PAUSED_TTL_SECONDS)")
         return self
 
     @property

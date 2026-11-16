@@ -102,6 +102,7 @@ async def _run_job(
 
     collector = UsageCollector()
     usage_token = bind_collector(collector)
+    paused: JobPaused | None = None
     try:
         try:
             store = ArtifactStore(settings.artifact_root, job_id)
@@ -148,8 +149,17 @@ async def _run_job(
                     )
                     checkpointer = None
                 graph = build_graph(deps, checkpointer=checkpointer)
+
+                async def settle_pause() -> None:
+                    # Every write this runner owes happens BEFORE the job becomes
+                    # resumable, so a fast resume's new run can't be overwritten.
+                    async with sessionmaker() as session:
+                        await _persist_tokens(session, job_id, collector)
+                    await _finish_ledger(job_id, {}, collector, JobStatus.PAUSED.value, started)
+
                 final, paused = await _drive(
-                    graph, init, config, resume, checkpointed=checkpointer is not None
+                    graph, init, config, resume, checkpointed=checkpointer is not None,
+                    control=deps.control, settle_pause=settle_pause,
                 )
         except Exception as exc:  # noqa: BLE001 - any failure -> visible FAILED status
             log.exception("job %s failed", job_id)
@@ -162,23 +172,27 @@ async def _run_job(
             await _finish_ledger(job_id, {}, collector, "failed", started)
             return
         if paused is not None:
-            async with sessionmaker() as session:
-                await _persist_tokens(session, job_id, collector)
-            await _finish_ledger(job_id, {}, collector, JobStatus.PAUSED.value, started)
+            # Parked: a resume may already own this job, so touch nothing shared after this.
             log.info("job %s paused at %s: %s", job_id, paused.stage, paused.message)
             return
     finally:
         reset_collector(usage_token)
-        forget(job_id)
+        if paused is None:  # a parked run already released its in-memory state before parking
+            forget(job_id)
 
     status = await _persist(job_id, final, collector)
     await _finish_ledger(job_id, final, collector, status, started)
 
 
 async def _drive(
-    graph, init: dict, config: dict, resume: bool, *, checkpointed: bool
+    graph, init: dict, config: dict, resume: bool, *, checkpointed: bool,
+    control: RunControl | None = None, settle_pause=None,
 ) -> tuple[dict, JobPaused | None]:
     """Run the graph; on a pause, park the job. Returns (final_state, pause_or_None).
+
+    Before parking, the runner finishes every write it owes (``settle_pause``) and drops
+    its in-memory state: once ``park_job`` commits, a resume can start a new runner at
+    any moment, and nothing of this one may land after that.
 
     If the pause was withdrawn while in-flight units drained, ``park_job`` refuses
     (the flag is gone) and we simply continue: as a resume, so finished nodes and
@@ -189,10 +203,16 @@ async def _drive(
         try:
             return await _invoke(graph, init, config, resume, checkpointed=checkpointed), None
         except JobPaused as paused:
+            if settle_pause is not None:
+                await settle_pause()
+            forget(job_id)  # in-flight units have drained; signals are re-created on demand
             async with get_sessionmaker()() as session:
                 if await repo.park_job(session, job_id):
                     return {}, paused
+                await repo.upsert_run(session, job_id, status="running")  # back from "paused"
             clear_pause(job_id)
+            if control is not None:
+                control.reset()  # else its cached "paused" answer re-pauses every retry
             log.info("job %s: pause withdrawn while draining; continuing from %s", job_id, paused.stage)
             resume = True
     raise RuntimeError("pause/resume toggled too many times in one run; resume it again")
