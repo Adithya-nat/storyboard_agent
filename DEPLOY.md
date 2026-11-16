@@ -179,6 +179,37 @@ Then open `http://<ip>:8000`.
 
 Coolify runs its own proxy for HTTPS, so don't also start the Caddy service.
 
+### Option C: your own computer + Tailscale Funnel (free, no domain, no open ports)
+
+Good for a small beta. The studio is online only while the computer is on, awake and connected.
+
+1. Install Tailscale (on a Mac, use the **App Store** version, which supports Funnel) and sign in.
+2. In the [admin console](https://login.tailscale.com): DNS → turn on **MagicDNS** and
+   **HTTPS Certificates**. Under Machines → your computer → ⋯, choose **Disable key expiry**.
+3. Your address is `<computer>.<tailnet>.ts.net` (shown in the Tailscale app). In `deploy/.env`
+   set `APP_DOMAIN=<that address>`, `API_DOMAIN=<that address>:8443`, and `WEB_DIR=` the
+   absolute path of your `creator-agent-web` checkout.
+4. Start only the API and the web app; Funnel replaces Caddy:
+
+   ```bash
+   docker compose -p creator-agent-host -f deploy/compose.prod.yml -f deploy/compose.laptop.yml \
+     --env-file deploy/.env up -d --build api web
+   tailscale funnel --bg --https=443  http://127.0.0.1:3300    # studio
+   tailscale funnel --bg --https=8443 http://127.0.0.1:8300    # API
+   ```
+
+   The first `funnel` run prints a link to approve Funnel for your tailnet. HTTPS can take
+   about a minute to work the first time while the certificate is issued.
+5. Keep the computer awake. On a Mac: System Settings → Battery → Options → "Prevent automatic
+   sleeping on power adapter when the display is off", and stay plugged in.
+
+The OAuth callbacks become `https://<address>/api/auth/callback/github` (and `/google`). A
+film interrupted by sleep or a restart can be resumed; finished work isn't re-paid. Funnel's
+bandwidth is limited by Tailscale (unpublished), which is fine for testers watching films.
+
+**Check:** `https://<address>:8443/health` shows `"auth_mode":"jwt"`, and `https://<address>`
+redirects to the sign-in page.
+
 ### Other options
 
 - **Any small VPS** (Hetzner, DigitalOcean and similar, about $5/month): Option A works
