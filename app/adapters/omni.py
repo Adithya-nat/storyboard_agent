@@ -186,6 +186,8 @@ class OmniVideoAdapter:
 
     def generate(self, image: bytes, spec: SceneSpec, *, key: str) -> OmniClip:
         """Image + scene spec -> mp4 bytes (with audio). Raises ProviderError when no model can."""
+        if self.settings.mock_mode:
+            raise ProviderError("AI video is off in mock mode")
         seconds = clip_seconds(spec)
         prompt = build_prompt(spec, seconds)
         cost, renders, last, first = 0.0, 0, None, None

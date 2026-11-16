@@ -24,6 +24,8 @@ from __future__ import annotations
 import threading
 import time
 
+from app.core.keys import current_scope
+
 
 class TokenBucket:
     """Classic token bucket. ``rate_per_minute`` tokens trickle in continuously;
@@ -80,6 +82,9 @@ _buckets: dict[str, tuple[TokenBucket, float, float | None]] = {}
 
 
 def _get_or_create(name: str, rate_per_minute: float, *, capacity: float | None = None) -> TokenBucket:
+    scope = current_scope()  # BYOK: each tester's key has its own Google quota
+    if scope:
+        name = f"{scope}/{name}"
     with _lock:
         existing = _buckets.get(name)
         if existing is None or existing[1] != rate_per_minute or existing[2] != capacity:
@@ -121,7 +126,7 @@ def get_tts_limiter(rate_per_minute: float, *, model: str = "") -> TokenBucket:
 def reset_tts_limiter() -> None:
     """Drop every TTS limiter (tests: isolate rate state between cases)."""
     with _lock:
-        for name in [n for n in _buckets if n == "tts" or n.startswith("tts:")]:
+        for name in [n for n in _buckets if n.rsplit("/", 1)[-1].split(":", 1)[0] == "tts"]:
             _buckets.pop(name, None)
 
 

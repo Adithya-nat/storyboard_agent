@@ -79,6 +79,18 @@ class JobCreatedResponse(BaseModel):
     status: JobStatus
 
 
+class JobListItem(BaseModel):
+    job_id: str
+    status: JobStatus
+    prompt: str
+    duration: int
+    style: str
+    language: str
+    cost_usd: float = 0.0
+    created_at: datetime
+    expires_at: datetime
+
+
 class ArtifactRef(BaseModel):
     """A reference to a stored artifact. Never inlines the binary, and never leaks
     the server filesystem path — the browser fetches bytes via ``url``."""

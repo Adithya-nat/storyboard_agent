@@ -71,6 +71,7 @@ class Job(Base):
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     style: Mapped[str] = mapped_column(String(16), nullable=False, default="narrated")
     language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # None = local mode
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -169,6 +170,7 @@ class SpendEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     category: Mapped[str] = mapped_column(String(16), nullable=False)
     provider: Mapped[str] = mapped_column(String(16), nullable=False, default="google")
@@ -184,7 +186,8 @@ class RunLedger(Base):
     __tablename__ = "run_ledger"
 
     job_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")  # blanked after 24h
     style: Mapped[str] = mapped_column(String(16), nullable=False, default="narrated")
     language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")
     duration: Mapped[int] = mapped_column(Integer, nullable=False, default=30)

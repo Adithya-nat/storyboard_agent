@@ -1,4 +1,4 @@
-# Storyboard: one-line commands for the API, web app, database and checks.
+# Creator Agent: one-line commands for the API, web app, database and checks.
 # Run `make` (or `make help`) to list everything.
 
 SHELL := /bin/bash
@@ -9,7 +9,7 @@ PY       := .venv/bin/python
 PYTHON   ?= $(shell for p in python3.13 python3.12 python3.11 $(HOME)/.pyenv/shims/python3 python3; do \
               command -v $$p >/dev/null 2>&1 && $$p -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null \
               && { command -v $$p; break; }; done)
-WEB      ?= ../storyboard_agent_frontend
+WEB      ?= $(or $(firstword $(wildcard ../creator-agent-web ../storyboard_agent_frontend)),../creator-agent-web)
 API_PORT ?= 8000
 WEB_PORT ?= 3000
 API_URL  := http://localhost:$(API_PORT)
@@ -19,7 +19,7 @@ STAMP    := $(shell date +%Y%m%d-%H%M%S)
 DESCRIBE   ?=
 GENDER     ?= female
 VOICE_LANG ?= en-US
-VOICE_NAME ?= Storyboard narrator
+VOICE_NAME ?= Creator Agent narrator
 
 .PHONY: help setup install install-web env db-up db-down db-logs db-shell migrate db-reset \
         dev api api-reload web web-prod stop status health budget open logs \

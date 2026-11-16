@@ -26,3 +26,4 @@ ratelimits_google_gemini.txt
 
 # Internal AI-agent build-handoff notes (local working notes, not for public repo)
 TODOS.md
+.gstack/

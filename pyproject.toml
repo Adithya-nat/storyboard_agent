@@ -1,7 +1,7 @@
 [project]
-name = "storyboard-agent"
-version = "0.1.0"
-description = "Agentic service that turns a text prompt into a short-form storyboard video"
+name = "creator-agent"
+version = "0.2.0"
+description = "Creator Agent: open-source AI studio that turns one line into a vertical short film"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.162",
@@ -21,6 +21,7 @@ dependencies = [
     "pillow>=11",  # + system libraqm for Tamil caption shaping
     "slowapi>=0.1.9",        # per-IP rate limit on the public create endpoint
     "httpx>=0.27",           # Turnstile siteverify (also used by tests)
+    "pyjwt[crypto]>=2.10",   # verifies sign-in tokens (Better Auth JWKS, EdDSA)
 ]
 
 [project.optional-dependencies]

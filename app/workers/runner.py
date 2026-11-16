@@ -20,6 +20,8 @@ from app.adapters.tts import GeminiTTSAdapter
 from app.artifacts.rows import artifact_rows
 from app.artifacts.store import ArtifactStore
 from app.core.config import get_settings
+from app.core.keys import bind_key, redact, release_key
+from app.core.model_check import validate_models
 from app.core.logging import get_logger
 from app.db import repository as repo
 from app.db.session import get_sessionmaker
@@ -42,8 +44,34 @@ async def run_job(
     language: str | None = None,
     allow_motion: bool = True,
     allow_stills: bool = False,
+    api_key: str | None = None,
+    user_id: str | None = None,
+) -> None:
+    key_token = bind_key(api_key)
+    try:
+        await _run_job(job_id, prompt, duration, resume, style, language, allow_motion, allow_stills,
+                       api_key, user_id)
+    finally:
+        release_key(api_key, key_token)
+
+
+async def _run_job(
+    job_id: str,
+    prompt: str,
+    duration: int,
+    resume: bool,
+    style: str | None,
+    language: str | None,
+    allow_motion: bool,
+    allow_stills: bool,
+    api_key: str | None,
+    user_id: str | None,
 ) -> None:
     settings = get_settings()
+    if api_key:  # BYOK: this job's own settings copy; the key is never written anywhere
+        settings = settings.model_copy(update={"gemini_api_key": api_key})
+        if settings.validate_models_on_startup and not settings.mock_mode:
+            await validate_models(settings)
     sessionmaker = get_sessionmaker()
 
     # Atomic acquire — the real concurrency guard. If another runner already owns
@@ -62,7 +90,7 @@ async def run_job(
     started = datetime.now(timezone.utc)
     async with sessionmaker() as session:
         await repo.upsert_run(
-            session, job_id, prompt=prompt, style=style, language=language,
+            session, job_id, prompt=prompt, style=style, language=language, user_id=user_id,
             duration=duration, status="running", started_at=started,
         )
 
@@ -122,7 +150,7 @@ async def run_job(
                 # Best-effort: a failed job still shows the tokens/spend it used.
                 await _persist_tokens(session, job_id, collector)
                 await repo.set_status(
-                    session, job_id, JobStatus.FAILED, error=f"{type(exc).__name__}: {exc}"
+                    session, job_id, JobStatus.FAILED, error=redact(f"{type(exc).__name__}: {exc}")
                 )
             await _finish_ledger(job_id, {}, collector, "failed", started)
             return

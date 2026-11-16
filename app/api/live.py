@@ -18,7 +18,8 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.routes import _artifact_url, _load_live_job
+from app.api.routes import _artifact_url, _load_owned_job
+from app.core.auth import User, allowed_user
 from app.artifacts.rows import assets_version
 from app.core.config import get_settings
 from app.db.session import get_session
@@ -139,8 +140,10 @@ def _caption(kit: dict) -> str | None:
 
 
 @router.get("/{job_id}/live", response_model=LiveAssets)
-async def get_live_assets(job_id: str, session: AsyncSession = Depends(get_session)) -> LiveAssets:
-    job = await _load_live_job(session, job_id)
+async def get_live_assets(
+    job_id: str, session: AsyncSession = Depends(get_session), user: User = Depends(allowed_user)
+) -> LiveAssets:
+    job = await _load_owned_job(session, job_id, user)
     arts = list(job.artifacts)
     by_kind = {a.kind: a for a in arts}
 

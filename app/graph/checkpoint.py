@@ -33,7 +33,7 @@ log = get_logger(__name__)
 def _psycopg_url(database_url: str) -> str:
     """The app talks to Postgres via SQLAlchemy+asyncpg; the LangGraph postgres
     saver talks via psycopg. Strip the driver tag so psycopg accepts the DSN."""
-    return database_url.replace("+asyncpg", "").replace("+psycopg", "")
+    return database_url.replace("+asyncpg", "").replace("+psycopg", "").replace("ssl=", "sslmode=")
 
 
 @asynccontextmanager
@@ -78,3 +78,52 @@ async def setup_checkpointer(settings: Settings) -> None:
 
     async with AsyncPostgresSaver.from_conn_string(_psycopg_url(settings.database_url)) as saver:
         await saver.setup()
+
+
+_PG_TABLES = ("checkpoint_writes", "checkpoint_blobs", "checkpoints")
+_SQLITE_TABLES = ("writes", "checkpoints")
+
+
+async def purge_checkpoints(settings: Settings, job_ids: list[str]) -> int:
+    """Delete saved graph state (scripts, dialogue) for expired jobs, incl. resume threads."""
+    if not job_ids:
+        return 0
+    url = settings.database_url
+    if url.startswith("postgresql"):
+        import psycopg
+
+        n = 0
+        async with await psycopg.AsyncConnection.connect(_psycopg_url(url), autocommit=True) as conn:
+            for table in _PG_TABLES:
+                exists = await (await conn.execute("SELECT to_regclass(%s)", (table,))).fetchone()
+                if not exists or exists[0] is None:
+                    continue
+                for jid in job_ids:
+                    cur = await conn.execute(
+                        f"DELETE FROM {table} WHERE thread_id = %s OR thread_id LIKE %s", (jid, f"{jid}:r:%")
+                    )
+                    n += cur.rowcount or 0
+        return n
+    if url.startswith("sqlite"):
+        import asyncio
+        import sqlite3
+
+        path = settings.artifact_root / "checkpoints.sqlite"
+        if not path.exists():
+            return 0
+
+        def _purge() -> int:
+            n = 0
+            with sqlite3.connect(path) as conn:
+                tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                for table in _SQLITE_TABLES:
+                    if table not in tables:
+                        continue
+                    for jid in job_ids:
+                        n += conn.execute(
+                            f"DELETE FROM {table} WHERE thread_id = ? OR thread_id LIKE ?", (jid, f"{jid}:r:%")
+                        ).rowcount
+            return n
+
+        return await asyncio.to_thread(_purge)
+    return 0

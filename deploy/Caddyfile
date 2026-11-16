@@ -1,0 +1,11 @@
+{$APP_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web:3000
+}
+
+{$API_DOMAIN} {
+	# flush immediately so the live progress stream (SSE) isn't buffered
+	reverse_proxy api:8000 {
+		flush_interval -1
+	}
+}

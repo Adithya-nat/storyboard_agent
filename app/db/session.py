@@ -23,7 +23,9 @@ from app.core.config import get_settings
 @lru_cache
 def get_engine() -> AsyncEngine:
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, future=True)
+    pg = settings.database_url.startswith("postgresql")
+    # pre_ping: Neon scales to zero and drops idle connections.
+    engine = create_async_engine(settings.database_url, future=True, **({"pool_pre_ping": True} if pg else {}))
     if settings.database_url.startswith("sqlite"):
         # SQLite (local dev + tests) serializes writers; without these, a poll
         # read overlapping a write raises "database is locked". WAL lets a reader

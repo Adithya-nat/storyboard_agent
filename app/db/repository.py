@@ -18,9 +18,11 @@ def _utcnow() -> datetime:
 
 
 async def create_job(
-    session: AsyncSession, prompt: str, duration: int, style: str = "narrated", language: str = "en"
+    session: AsyncSession, prompt: str, duration: int, style: str = "narrated", language: str = "en",
+    user_id: str | None = None,
 ) -> Job:
-    job = Job(prompt=prompt, duration=duration, style=style, language=language, status=JobStatus.QUEUED.value)
+    job = Job(prompt=prompt, duration=duration, style=style, language=language,
+              status=JobStatus.QUEUED.value, user_id=user_id)
     session.add(job)
     await session.commit()
     await session.refresh(job)
@@ -222,8 +224,37 @@ async def delete_expired_jobs(session: AsyncSession, ttl_seconds: int) -> list[s
     await session.execute(delete(JobStage).where(JobStage.job_id.in_(expired)))
     await session.execute(delete(Artifact).where(Artifact.job_id.in_(expired)))
     await session.execute(delete(Job).where(Job.id.in_(expired)))
+    # 24h rule: the prompt is content too; only cost/count metrics outlive the job.
+    await session.execute(update(RunLedger).where(RunLedger.job_id.in_(expired)).values(prompt=""))
     await session.commit()
     return expired
+
+
+async def next_expiry(session: AsyncSession, ttl_seconds: int) -> datetime | None:
+    """When the oldest remaining job expires (None = no jobs)."""
+    oldest = await session.scalar(select(func.min(Job.created_at)))
+    if oldest is None:
+        return None
+    if oldest.tzinfo is None:
+        oldest = oldest.replace(tzinfo=timezone.utc)
+    return oldest + timedelta(seconds=ttl_seconds)
+
+
+ACTIVE = (JobStatus.QUEUED.value, JobStatus.RUNNING.value)
+
+
+async def count_active_jobs(session: AsyncSession, user_id: str | None = None) -> int:
+    q = select(func.count()).select_from(Job).where(Job.status.in_(ACTIVE))
+    if user_id is not None:
+        q = q.where(Job.user_id == user_id)
+    return int(await session.scalar(q) or 0)
+
+
+async def list_jobs(session: AsyncSession, user_id: str | None, since: datetime, limit: int = 50) -> list[Job]:
+    q = select(Job).where(Job.created_at >= since).order_by(Job.created_at.desc()).limit(limit)
+    if user_id is not None:
+        q = q.where(Job.user_id == user_id)
+    return list((await session.execute(q)).scalars().all())
 
 
 # --------------------------------------------------------------------------- #
@@ -372,9 +403,10 @@ def is_terminal(status: str) -> bool:
 # Spend + run ledger (persistent; never swept)
 # --------------------------------------------------------------------------- #
 async def add_spend_events(session: AsyncSession, job_id: str, events) -> None:
+    user_id = await session.scalar(select(Job.user_id).where(Job.id == job_id))
     for e in events:
         session.add(SpendEvent(
-            job_id=job_id, stage=e.stage, category=e.category, provider=e.provider,
+            job_id=job_id, user_id=user_id, stage=e.stage, category=e.category, provider=e.provider,
             model=e.model, cost_usd=e.cost_usd, units=e.units, created_at=e.at,
         ))
     await session.commit()
@@ -417,22 +449,28 @@ def month_start(now: datetime | None = None) -> datetime:
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
-async def spend_since(session: AsyncSession, since: datetime) -> float:
-    total = await session.scalar(select(func.sum(SpendEvent.cost_usd)).where(SpendEvent.created_at >= since))
-    return float(total or 0.0)
+async def spend_since(session: AsyncSession, since: datetime, user_id: str | None = None) -> float:
+    q = select(func.sum(SpendEvent.cost_usd)).where(SpendEvent.created_at >= since)
+    if user_id is not None:
+        q = q.where(SpendEvent.user_id == user_id)
+    return float(await session.scalar(q) or 0.0)
 
 
-async def runs_since(session: AsyncSession, since: datetime | None) -> list[RunLedger]:
+async def runs_since(session: AsyncSession, since: datetime | None, user_id: str | None = None) -> list[RunLedger]:
     q = select(RunLedger).order_by(RunLedger.started_at.desc())
     if since is not None:
         q = q.where(RunLedger.started_at >= since)
+    if user_id is not None:
+        q = q.where(RunLedger.user_id == user_id)
     return list((await session.execute(q)).scalars().all())
 
 
-async def spend_events_since(session: AsyncSession, since: datetime | None) -> list[SpendEvent]:
+async def spend_events_since(session: AsyncSession, since: datetime | None, user_id: str | None = None) -> list[SpendEvent]:
     q = select(SpendEvent)
     if since is not None:
         q = q.where(SpendEvent.created_at >= since)
+    if user_id is not None:
+        q = q.where(SpendEvent.user_id == user_id)
     return list((await session.execute(q)).scalars().all())
 
 
@@ -440,8 +478,12 @@ async def spend_events_for_job(session: AsyncSession, job_id: str) -> list[Spend
     return list((await session.execute(select(SpendEvent).where(SpendEvent.job_id == job_id))).scalars().all())
 
 
-async def list_runs(session: AsyncSession, limit: int = 50, before: datetime | None = None) -> list[RunLedger]:
+async def list_runs(
+    session: AsyncSession, limit: int = 50, before: datetime | None = None, user_id: str | None = None
+) -> list[RunLedger]:
     q = select(RunLedger).order_by(RunLedger.started_at.desc()).limit(limit)
     if before is not None:
         q = q.where(RunLedger.started_at < before)
+    if user_id is not None:
+        q = q.where(RunLedger.user_id == user_id)
     return list((await session.execute(q)).scalars().all())

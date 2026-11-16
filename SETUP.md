@@ -1,12 +1,13 @@
 # Setup
 
 Everything you need to go from a fresh machine to posting AI short films. Covers all three repos.
-Every step has a `make` shortcut (run `make` in `storyboard_agent` to list them all).
+Every step has a `make` shortcut (run `make` in `creator-agent` to list them all).
+This guide runs Creator Agent on your own machine. To host it for other people, see [DEPLOY.md](DEPLOY.md).
 
 | Repo | What it is | Port |
 | --- | --- | --- |
-| `storyboard_agent` (this repo) | API + the AI pipeline (script, cast, frames, AI video, voices, music, edit) | 8000 |
-| `storyboard_agent_frontend` | The web app | 3000 |
+| `creator-agent` (this repo) | API + the AI pipeline (script, cast, frames, AI video, voices, music, edit) | 8000 |
+| `creator-agent-web` | The web app | 3000 |
 | `storyboard_engine` | Optional legacy local-motion service. Not needed: AI video runs inside the API. | 8090 |
 
 ## 1. Install the tools
@@ -42,12 +43,12 @@ Typical cost (measured on real films, Nov 2026): **~$6â€“8 for a 30s film, ~$13â
 ## 4. Configure the API
 
 ```bash
-cd storyboard_agent
+cd creator-agent
 make setup    # .venv + API deps, web app packages, .env + .env.local, Postgres, migrations
 ```
 
 `make setup` covers steps 4 and 5. The web app is expected next door at
-`../storyboard_agent_frontend` (override with `make setup WEB=/path/to/frontend`).
+`../creator-agent-web` (override with `make setup WEB=/path/to/frontend`).
 
 Edit `.env`. The only required line is:
 

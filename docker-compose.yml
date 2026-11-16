@@ -1,4 +1,4 @@
-# Local Postgres for the storyboard agent.
+# Local Postgres for Creator Agent (names kept from the pre-rebrand setup so existing data survives).
 # Connect pgAdmin 4 to: host=localhost port=5432 user=storyboard pass=storyboard db=storyboard
 services:
   postgres:

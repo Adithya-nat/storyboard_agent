@@ -8,6 +8,8 @@ import threading
 import time
 from collections import deque
 
+from app.core.keys import current_scope
+
 WINDOW_SECONDS = 600.0
 
 
@@ -65,16 +67,18 @@ class SpendRateGovernor:
                 self._events.append((time.monotonic(), usd))
 
 
-_governor: SpendRateGovernor | None = None
+_governors: dict[str, SpendRateGovernor] = {}
 _glock = threading.Lock()
 
 
 def get_governor(limit_usd: float) -> SpendRateGovernor:
-    global _governor
+    """One governor per API key (Google's spend limit is per project/key)."""
+    scope = current_scope()
     with _glock:
-        if _governor is None or _governor.limit != limit_usd:
-            _governor = SpendRateGovernor(limit_usd)
-        return _governor
+        gov = _governors.get(scope)
+        if gov is None or gov.limit != limit_usd:
+            gov = _governors[scope] = SpendRateGovernor(limit_usd)
+        return gov
 
 
 def is_spend_rate_limited(exc: BaseException) -> bool:
