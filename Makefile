@@ -24,7 +24,7 @@ VOICE_NAME ?= Creator Agent narrator
 .PHONY: help setup install install-web env db-up db-down db-logs db-shell migrate db-reset \
         dev api api-reload web web-prod stop status health budget open logs \
         doctor doctor-live voice test test-cov test-live test-web typecheck lint build-web check \
-        evals evals-mock probe-g1 bakeoff-images bakeoff-scripts diagram clean clean-artifacts
+        evals evals-mock probe-g1 host-up host-down host-status host-logs bakeoff-images bakeoff-scripts diagram clean clean-artifacts
 
 ##@ Getting started
 help: ## Show this list
@@ -165,6 +165,27 @@ bakeoff-scripts: ## Script-model bake-off (Gemini vs Claude); OUT=dir
 
 diagram: ## Print the pipeline diagram (Mermaid) for the README
 	$(PY) -m scripts.render_pipeline_diagram
+
+##@ Hosted copy on this computer (Tailscale Funnel; see DEPLOY.md option C)
+HOST := docker compose -p creator-agent-host -f deploy/compose.prod.yml -f deploy/compose.laptop.yml --env-file deploy/.env
+TAILSCALE ?= $(or $(shell command -v tailscale),/Applications/Tailscale.app/Contents/MacOS/Tailscale)
+
+host-up: ## Build + start the hosted API and web app, then publish them with Funnel
+	$(HOST) up -d --build api web
+	$(TAILSCALE) funnel --bg --https=443 http://127.0.0.1:3300
+	$(TAILSCALE) funnel --bg --https=8443 http://127.0.0.1:8300
+
+host-down: ## Stop the hosted copy and take it off the internet (interrupts running films)
+	-$(TAILSCALE) funnel reset
+	$(HOST) down
+
+host-status: ## Containers, health and what Funnel publishes
+	@$(HOST) ps --format '{{.Service}}: {{.Status}}'
+	@curl -fsS localhost:8300/health && echo || echo "API not answering on :8300"
+	@$(TAILSCALE) funnel status
+
+host-logs: ## Follow hosted logs: make host-logs [SERVICE=api|web]
+	$(HOST) logs -f --tail 200 $(SERVICE)
 
 ##@ Clean up
 clean: ## Remove caches and the web build
