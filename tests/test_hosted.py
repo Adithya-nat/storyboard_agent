@@ -163,6 +163,20 @@ async def test_byok_requires_a_key(hosted, client, captured, monkeypatch):
     assert kwargs["api_key"] == KEY and kwargs["user_id"] == "u1"
 
 
+async def test_byok_resume_needs_the_key_again(hosted, client, captured, monkeypatch):
+    monkeypatch.setattr(hosted, "key_mode", "byok")
+    monkeypatch.setattr(hosted, "use_mock_providers", False)
+    job = await _job(user_id="u1")
+    async with get_sessionmaker()() as s:
+        await repo.set_status(s, job.id, JobStatus.FAILED, error="AIVideoUnavailable: quota")
+    r = await client.post(f"/storyboard/{job.id}/resume", headers=bearer())
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "key_required"
+    r = await client.post(f"/storyboard/{job.id}/resume", headers={**bearer(), "x-gemini-key": KEY})
+    assert r.status_code == 202
+    (_, kwargs), = captured
+    assert kwargs["api_key"] == KEY and kwargs["user_id"] == "u1"
+
+
 async def test_one_active_film_per_user(hosted, client, captured):
     body = {"prompt": "a robot", "duration": 30}
     assert (await client.post("/storyboard", json=body, headers=bearer())).status_code == 202
