@@ -27,6 +27,7 @@ class User:
     id: str
     email: str = ""
     name: str = ""
+    email_verified: bool = False
 
     @property
     def local(self) -> bool:
@@ -44,7 +45,7 @@ LOCAL_USER = User(id=LOCAL_USER_ID, name="You")
 def is_allowed(user: User, settings: Settings) -> bool:
     if user.local:
         return True
-    email = user.email.lower()
+    email = user.email.lower() if user.email_verified else ""  # an unverified email proves nothing
     for entry in (e.strip().lower() for e in settings.allowed_users):
         if entry == "*" or (email and (entry == email or (entry.startswith("@") and email.endswith(entry)))):
             return True
@@ -75,7 +76,12 @@ def verify_jwt(token: str, settings: Settings) -> User:
         raise HTTPException(status_code=503, detail="sign-in service unreachable") from exc
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=401, detail="sign in again (invalid or expired session)") from exc
-    return User(id=str(claims["sub"]), email=str(claims.get("email") or ""), name=str(claims.get("name") or ""))
+    return User(
+        id=str(claims["sub"]),
+        email=str(claims.get("email") or ""),
+        name=str(claims.get("name") or ""),
+        email_verified=claims.get("emailVerified") is True,
+    )
 
 
 async def current_user(request: Request) -> User:

@@ -33,10 +33,10 @@ AUD = "creator-agent-api"
 _PRIV = Ed25519PrivateKey.generate()
 
 
-def token(sub="u1", email="ada@example.com", exp_in=600, aud=AUD, iss=ISS) -> str:
+def token(sub="u1", email="ada@example.com", exp_in=600, aud=AUD, iss=ISS, verified=True) -> str:
     now = int(time.time())
     return jwt.encode(
-        {"sub": sub, "email": email, "name": "Ada", "aud": aud, "iss": iss, "iat": now, "exp": now + exp_in},
+        {"sub": sub, "email": email, "emailVerified": verified, "name": "Ada", "aud": aud, "iss": iss, "iat": now, "exp": now + exp_in},
         _PRIV, algorithm="EdDSA",
     )
 
@@ -106,6 +106,11 @@ async def test_allowlist(hosted, client):
     assert (await client.get("/storyboard", headers=bearer(email="bob@team.dev"))).status_code == 200
     me = (await client.get("/me", headers=bearer(email="eve@else.com"))).json()
     assert me["allowed"] is False and me["media_token"] is None
+
+
+async def test_allowlist_needs_a_verified_email(hosted, client):
+    r = await client.get("/storyboard", headers=bearer(email="ada@example.com", verified=False))
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "not_allowlisted"
 
 
 # --- per-user jobs ---------------------------------------------------------------------- #
