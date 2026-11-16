@@ -9,15 +9,21 @@
 
   // ---------- links: the app URL comes from the deploy workflow ----------
   const app = (cfg.appUrl || "").replace(/\/$/, "");
+  // Log in / Sign up go to the hosted app; before it exists they point at the "opening soon" note.
+  const soon = $("#beta-soon");
   $$("[data-app-link]").forEach((a) => {
-    if (app) a.href = app + a.dataset.appLink;
-    else {
-      a.href = "https://github.com/Adithya-nat/creator-agent#run-it-yourself";
-      if (a.hasAttribute("data-cta")) a.textContent = "Run it yourself";
+    if (app) {
+      a.href = app + a.dataset.appLink;
+      return;
     }
+    a.href = "#beta-soon";
+    a.addEventListener("click", () => {
+      soon.classList.remove("flash");
+      void soon.offsetWidth; // restart the highlight
+      soon.classList.add("flash");
+    });
   });
-  if (!app) $$("[data-soon]").forEach((el) => (el.hidden = false));
-  if (!app) $$(".nav__signin").forEach((el) => (el.hidden = true));
+  if (!app) soon.hidden = false;
 
   // ---------- GitHub stars ----------
   fetch("https://api.github.com/repos/Adithya-nat/creator-agent")
