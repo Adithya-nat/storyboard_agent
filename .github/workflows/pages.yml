@@ -25,11 +25,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Point the sign-in buttons at the hosted app
+      - name: Point the sign-in buttons at the hosted app, and the film library at its API
         env:
           APP_URL: ${{ vars.APP_URL }}
+          API_URL: ${{ vars.API_URL }}
         run: |
-          printf 'window.CREATOR_AGENT = { appUrl: %s };\n' "$(jq -Rn --arg u "$APP_URL" '$u')" > site/config.js
+          printf 'window.CREATOR_AGENT = { appUrl: %s, apiUrl: %s };\n' \
+            "$(jq -Rn --arg u "$APP_URL" '$u')" "$(jq -Rn --arg u "$API_URL" '$u')" > site/config.js
           cat site/config.js
 
       - uses: actions/configure-pages@v5

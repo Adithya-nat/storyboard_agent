@@ -62,6 +62,9 @@ class SceneRescue(BaseModel):
     scene: str
     image_prompt: str
     lines: list[_Line] = []
+    # One rewritten action per planned shot, in order. A multi-shot clip is prompted from these,
+    # not from ``scene``, so a rewrite that leaves them out resends the blocked actions.
+    shots: list[str] = []
     change: str = ""
 
 
@@ -78,6 +81,9 @@ def apply_rescue(spec: SceneSpec, r: SceneRescue | dict) -> SceneSpec:
         if [s for s, _, _ in new] == [s for s, _, _ in spec.lines]:
             lines, it = new, iter(new)
             shots = tuple(dataclasses.replace(sh, lines=tuple(next(it) for _ in sh.lines)) for sh in spec.shots)
+    actions = [a.strip() for a in r.shots]
+    if shots and len(actions) == len(shots) and all(actions):
+        shots = tuple(dataclasses.replace(sh, action=a) for sh, a in zip(shots, actions))
     return dataclasses.replace(spec, scene=r.scene, lines=lines, shots=shots)
 
 
@@ -89,19 +95,23 @@ def _rewrite(deps: Deps, spec: SceneSpec, code: str, message: str, attempt: int)
     )
     lines = "\n".join(f"{s}: {t} ({d})" for s, t, d in spec.lines) or "(none)"
     if spec.shots:
-        shots = "\n".join(f"- {sh.size}: {sh.action}" for sh in spec.shots)
+        shots = "\n".join(f"{i}. {sh.size}: {sh.action}" for i, sh in enumerate(spec.shots, 1))
         scene_text = f"{spec.scene}\nShots:\n{shots}"
+        shots_rule = render("omni/rescue_shots", count=len(spec.shots))
     else:
         scene_text = spec.scene
+        shots_rule = "The scene is one continuous shot: return shots as an empty list."
 
     def mock(_u: str) -> SceneRescue:
         return SceneRescue(scene=f"{spec.scene} (rewritten)", image_prompt=spec.scene,
-                           lines=[_Line(speaker=s, text=t, delivery=d) for s, t, d in spec.lines], change="mock rewrite")
+                           lines=[_Line(speaker=s, text=t, delivery=d) for s, t, d in spec.lines],
+                           shots=[f"{sh.action} (rewritten)" for sh in spec.shots], change="mock rewrite")
 
     return deps.llm.complete_json(
         system=render("omni/rescue_system", rules=rules),
         user=render("omni/rescue_user", code=code, message=message[:500], attempt_note=note, mode=spec.mode,
-                    language=spec.language, scene=scene_text, lines=lines, characters=", ".join(spec.characters) or "none"),
+                    language=spec.language, scene=scene_text, lines=lines, characters=", ".join(spec.characters) or "none",
+                    shots_rule=shots_rule),
         response_model=SceneRescue,
         role="designer",
         mock_factory=mock,
@@ -234,6 +244,9 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
             for sc in s.scenes:
                 if sc.order == order:
                     sc.description = rewrite.scene
+                    if rewrite.shots and len(rewrite.shots) == len(sc.shots):
+                        for sh, action in zip(sc.shots, rewrite.shots):
+                            sh.action = action.strip() or sh.action
                     if sc.mode == "dialogue" and rewrite.lines and len(rewrite.lines) == len(sc.shot_lines() or sc.lines):
                         for line, new in zip(sc.shot_lines() or sc.lines, rewrite.lines):
                             line.text, line.delivery = new.text, new.delivery or line.delivery

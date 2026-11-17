@@ -210,3 +210,34 @@ class RunLedger(Base):
     models: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Film library: films a user chose to show on the homepage. NOT linked to jobs, so it
+# outlives the 24-hour sweep; its media lives under the library folder, not the job's.
+class LibraryFilm(Base):
+    __tablename__ = "library_films"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # url slug
+    job_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # rendering -> draft -> published; failed when media or the poster could not be made
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="rendering")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    native_title: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    tagline: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    logline: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    genre: Mapped[str] = mapped_column(String(48), nullable=False, default="")
+    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)  # None = creator kept it private
+    language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")
+    style: Mapped[str] = mapped_column(String(16), nullable=False, default="dialogue")
+    length_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    made_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    poster_look: Mapped[str] = mapped_column(String(24), nullable=False, default="auto")
+    poster_frame: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    poster_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    posters_made: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)

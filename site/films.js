@@ -1,4 +1,4 @@
-(() => {
+(async () => {
   "use strict";
 
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -28,6 +28,17 @@
 
   // Real runs: cost is what Google billed our key; "made" is wall-clock render time.
   const FILMS = [
+    {
+      id: "grand-theft-auto-chennai",
+      title: "Grand Theft Auto Chennai",
+      native: "மீட்டர் போடு ராஜா",
+      lang: "ta", langName: "Tamil",
+      genre: "Crime comedy", style: "Dialogue", styleNote: "Characters speak on camera, lip-synced",
+      length: "1:00", scenes: 5, made: 31, cost: 12.34,
+      glow: "rgba(245, 165, 40, 0.5)",
+      logline: "North Chennai, one rainy night. A cocky auto driver and his sharp-eyed partner lift a briefcase of gold from harbour boss Dass, splash his white silk shirt on the way out, and lead his black SUV and the city police on a chase through the metro pillars and the bazaar lanes.",
+      prompt: "Grand Theft Auto Chennai Official Trailer",
+    },
     {
       id: "irumbukai-mayavi",
       title: "Irumbukai Mayavi",
@@ -86,8 +97,44 @@ Create a proper 60s content in tamil please.`,
       prompt: "Comedy sketch on what if a Super Hero turns out to be a weed addict in California?",
     },
   ];
+  // Films creators published from the studio, served by the hosted API. The curated films
+  // above always show; published ones follow them when the API answers in time.
+  const API = String((window.CREATOR_AGENT || {}).apiUrl || "").replace(/\/+$/, "");
+  const STYLE_NOTES = {
+    dialogue: ["Dialogue", "Characters speak on camera, lip-synced"],
+    mixed: ["Mixed", "A narrator and on-camera dialogue"],
+    narrated: ["Narrated", "A narrator tells it over moving scenes"],
+  };
+  const GLOWS = ["rgba(242, 181, 68, 0.45)", "rgba(110, 200, 230, 0.4)", "rgba(230, 110, 140, 0.4)", "rgba(150, 190, 90, 0.42)"];
+  const MEDIA = { "poster.jpg": "poster", "frame.jpg": "frame", "preview.mp4": "preview", "film.mp4": "film" };
+  async function addPublished(list) {
+    if (!API) return;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 2500);
+    try {
+      const res = await fetch(`${API}/library/public`, { signal: ctl.signal });
+      if (!res.ok) return;
+      const taken = new Set(list.map((f) => f.id));
+      (await res.json()).forEach((p, i) => {
+        const [style, styleNote] = STYLE_NOTES[p.style] || STYLE_NOTES.dialogue;
+        const id = `p-${p.id}`;
+        if (taken.has(id)) return;
+        taken.add(id);
+        list.push({
+          id, title: p.title, native: p.native_title || undefined,
+          lang: p.language === "ta" ? "ta" : "en", langName: p.language === "ta" ? "Tamil" : "English",
+          genre: p.genre || "Short film", style, styleNote,
+          length: fmt(p.length_seconds), scenes: p.scenes, made: p.made_minutes, cost: p.cost_usd,
+          glow: GLOWS[i % GLOWS.length], logline: p.logline || p.tagline || "",
+          prompt: p.prompt || "", media: p.media, published: true,
+        });
+      });
+    } catch { /* offline or slow: the curated films still show */ } finally { clearTimeout(timer); }
+  }
+  await addPublished(FILMS);
+
   const byId = Object.fromEntries(FILMS.map((f) => [f.id, f]));
-  const src = (f, file) => `films/${f.id}/${file}`;
+  const src = (f, file) => (f.media ? `${API}${f.media[MEDIA[file]]}` : `films/${f.id}/${file}`);
   const langTag = (f) => (f.lang === "ta" ? `<span class="ta" lang="ta">தமிழ்</span>` : f.langName);
   const metaHTML = (f) => `
     <ul class="meta">
@@ -270,7 +317,7 @@ Create a proper 60s content in tamil please.`,
 
   // ---------- prompts ----------
   const lines = $("[data-lines]");
-  lines.innerHTML = FILMS.map((f, i) => {
+  lines.innerHTML = FILMS.filter((f) => f.prompt).map((f, i) => {
     const words = f.prompt.trim().split(/\s+/).length;
     const long = words > 60;
     return `
@@ -336,13 +383,13 @@ Create a proper 60s content in tamil please.`,
       ${metaHTML(f)}
       <div class="info__ctas"><button class="btn btn--light btn--icon" type="button" data-play="${f.id}">${I.play}Play</button></div>
       <p class="info__log">${esc(f.logline)}</p>
-      <div class="info__prompt"><p class="line__label">The prompt that made it</p><p>${esc(f.prompt)}</p></div>
+      ${f.prompt ? `<div class="info__prompt"><p class="line__label">The prompt that made it</p><p>${esc(f.prompt)}</p></div>` : ""}
       <dl class="info__facts">
         <div><dt>Language</dt><dd>${f.lang === "ta" ? "Tamil, dialogue and narration" : "English"}</dd></div>
         <div><dt>Style</dt><dd>${esc(f.style)}: ${esc(f.styleNote.toLowerCase())}</dd></div>
         <div><dt>Scenes</dt><dd>${f.scenes}, every one filmed as AI video</dd></div>
-        <div><dt>Rendered in</dt><dd>${f.made} minutes</dd></div>
-        <div><dt>Google bill</dt><dd>$${f.cost.toFixed(2)} on our own Gemini key</dd></div>
+        <div><dt>Rendered in</dt><dd>${f.made} minute${f.made === 1 ? "" : "s"}</dd></div>
+        <div><dt>Google bill</dt><dd>$${f.cost.toFixed(2)} on ${f.published ? "the creator's own" : "our own"} Gemini key</dd></div>
       </dl>
       <div class="info__more">
         <p class="line__label">More films</p>

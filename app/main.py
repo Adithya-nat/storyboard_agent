@@ -31,6 +31,7 @@ from app.api.usage import router as usage_router
 from app.api.live import router as live_router
 from app.api.account import router as account_router
 from app.api.controls import router as controls_router
+from app.api.library import router as library_router
 from app.core.images import raqm_available
 from app.core.keys import RedactKeysFilter
 from app.core.model_check import validate_models
@@ -139,6 +140,7 @@ app.include_router(usage_router)
 app.include_router(live_router)
 app.include_router(account_router)
 app.include_router(controls_router)
+app.include_router(library_router)
 
 
 @app.get("/health")

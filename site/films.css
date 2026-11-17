@@ -85,9 +85,9 @@ button.btn { border: 0; cursor: pointer; }
 .bb__queue {
   position: absolute; left: 0; right: 0; bottom: clamp(28px, 5vh, 48px);
   max-width: var(--wrap); margin: 0 auto; padding: 0 var(--gutter);
-  display: grid; grid-template-columns: repeat(3, minmax(0, 210px)); gap: 14px;
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 214px); justify-content: start; gap: 14px;
 }
-.q { display: grid; gap: 10px; padding: 0; text-align: left; background: none; border: 0; cursor: pointer; color: var(--grain-2); transition: color 0.3s; }
+.q { min-width: 0; display: grid; gap: 10px; padding: 0; text-align: left; background: none; border: 0; cursor: pointer; color: var(--grain-2); transition: color 0.3s; }
 .q:hover, .q[aria-selected="true"] { color: var(--celluloid); }
 .q__bar { height: 3px; border-radius: 3px; background: rgba(244, 239, 230, 0.16); overflow: hidden; }
 .q__bar i { display: block; height: 100%; width: 100%; background: var(--celluloid); transform-origin: left; transform: scaleX(var(--p, 0)); }
@@ -321,7 +321,7 @@ button.btn { border: 0; cursor: pointer; }
   .bb__title { margin-inline: auto; font-size: clamp(42px, 13vw, 64px); }
   .bb__log { margin-inline: auto; font-size: 15px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .bb__ctas .btn { flex: 1; max-width: 200px; }
-  .bb__queue { top: calc(var(--nav-h) + 8px); bottom: auto; z-index: 3; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .bb__queue { top: calc(var(--nav-h) + 8px); bottom: auto; z-index: 3; grid-auto-columns: 1fr; justify-content: stretch; gap: 6px; }
   .q__name { display: none; }
   .q__bar { height: 2.5px; }
   .info__close { position: fixed; top: 22px; right: 22px; }

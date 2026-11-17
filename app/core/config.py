@@ -111,6 +111,11 @@ class Settings(BaseSettings):
 
     # --- Storage ---
     artifact_root: Path = Path("./artifacts_store")
+    # Films published to the homepage library. Empty = <artifact_root>/_library, which the
+    # 24-hour sweep never touches (it only removes job-id folders).
+    library_root: str = ""
+    # Posters one library film may generate (each is one paid image call on the creator's key).
+    library_poster_limit: int = 8
 
     # --- Image generation: reliability + format + throughput (Phase 3) ---
     # Re-rolls (empty/no-image responses) + transient retries before giving up to a
@@ -302,6 +307,10 @@ class Settings(BaseSettings):
     def mock_mode(self) -> bool:
         """Mock when explicitly requested OR when no API key is configured."""
         return self.use_mock_providers or not self.gemini_api_key.strip()
+
+    @property
+    def library_dir(self) -> Path:
+        return Path(self.library_root) if self.library_root.strip() else Path(self.artifact_root) / "_library"
 
     # --- Role routing helpers ---------------------------------------------- #
     def role_model(self, role: str) -> str:

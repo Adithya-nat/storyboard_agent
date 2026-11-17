@@ -1,0 +1,2 @@
+<!-- Rescue: a multi-shot scene. The video is prompted shot by shot from these actions. Vars: count. -->
+The video is filmed from the numbered shot actions above, one by one, so the rewrite must reach them: return shots as exactly {{ count }} rewritten actions, in the same order, one per shot. Rewrite every action that carries the problem (and any wording close to it), keep the others word for word, and keep each shot's subject, framing and story purpose. The scene description and image_prompt must agree with the rewritten actions.
