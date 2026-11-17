@@ -105,7 +105,7 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
                 except ProviderError as exc:
                     # The bridge captures this log.warning into job_logs (image_gen
                     # stage) via the contextvar — no explicit reporter.log needed.
-                    log.warning("frame %s generation failed after retries: %s", shot.order, exc)
+                    log.warning("frame %s generation failed: %s", shot.order, exc)
                     failures[shot.order] = str(exc)
         done += 1  # single-threaded event loop: safe (no await between read+write)
         if reporter is not None:

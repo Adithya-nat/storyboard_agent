@@ -33,7 +33,27 @@ T = TypeVar("T", bound=BaseModel)
 
 def _is_transient(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return any(k in msg for k in ("429", "resource_exhausted", "rate", "503", "500", "unavailable"))
+    if any(k in msg for k in ("429", "resource_exhausted", "rate", "503", "500", "unavailable")):
+        return True
+    return _is_network_blip(exc)
+
+
+def _is_network_blip(exc: BaseException) -> bool:
+    """A TLS error or a failed connect: the request never reached Google, so a retry is
+    safe and isn't billed twice. Timeouts are left out because the call may have run."""
+    import ssl
+
+    import httpx
+
+    seen = 0
+    while exc is not None and seen < 8:
+        if isinstance(exc, (ssl.SSLError, httpx.ConnectError)):
+            return True
+        if str(exc).startswith("[SSL:"):  # some wrappers keep only the message
+            return True
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return False
 
 
 # Gemini 429s carry their own back-off hint in TWO spots of the error string:

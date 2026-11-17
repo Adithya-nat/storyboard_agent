@@ -42,6 +42,8 @@ class _FakeModels:
     def generate_content(self, **_kw):
         r = self._responses[min(self.calls, len(self._responses) - 1)]
         self.calls += 1
+        if isinstance(r, BaseException):
+            raise r
         return r
 
 
@@ -103,6 +105,39 @@ def test_generate_image_block_does_not_reroll(monkeypatch):
     with pytest.raises(PermanentProviderError):
         a.generate_image("blocked prompt")
     assert a._client.models.calls == 1  # gave up immediately, no wasted re-roll
+
+
+def _tls_blip() -> Exception:
+    import ssl
+
+    import httpx
+
+    try:
+        try:
+            raise ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] ssl/tls alert bad record mac (_ssl.c:2581)")
+        except ssl.SSLError as e:
+            raise httpx.ReadError(str(e)) from e
+    except httpx.ReadError as wrapped:
+        return wrapped
+
+
+def test_network_blips_are_transient_but_timeouts_are_not():
+    import httpx
+
+    from app.adapters.llm import _is_transient
+
+    assert _is_transient(_tls_blip())
+    assert _is_transient(httpx.ConnectError("[Errno 61] Connection refused"))
+    assert _is_transient(RuntimeError("[SSL: TLSV1_ALERT_PROTOCOL_VERSION] tlsv1 alert protocol version"))
+    assert not _is_transient(httpx.ReadTimeout("The read operation timed out"))  # the call may have run
+    assert not _is_transient(ValueError("invalid argument"))
+
+
+def test_generate_image_retries_a_tls_blip(monkeypatch):
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda *_a, **_k: None)
+    a = _adapter([_tls_blip(), _resp(image=b"PNG3", finish="STOP")])
+    assert a.generate_image("safe prompt") == b"PNG3"
+    assert a._client.models.calls == 2
 
 
 # --------------------------------------------------------------------------- #
