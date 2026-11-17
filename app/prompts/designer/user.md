@@ -4,3 +4,4 @@
 </script_json>
 
 Write a Shotlist with every location, and exactly {{ n }} shots (order {{ first_order }}..), one opening frame per scene, preserving each scene's location and narration and listing the visible characters.
+{{ direction }}

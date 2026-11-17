@@ -6,6 +6,7 @@ import asyncio
 import shutil
 
 from app.adapters.errors import ProviderError
+from app.agents.redo_director import direction
 from app.core.logging import get_logger
 from app.graph.state import Deps, StoryboardState
 from app.prompts import render
@@ -50,6 +51,7 @@ async def publish_kit(state: StoryboardState, deps: Deps) -> StoryboardState:
             user=render(
                 "publish_kit/user", title=script.title, logline=script.logline,
                 arc=script.arc, style=script.style, duration=state["duration"],
+                direction=direction(store, "release"),
             ),
             response_model=PublishKit,
             role="publish",

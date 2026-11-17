@@ -752,3 +752,158 @@ class PublishKit(BaseModel):
 
 # Resolve forward references (StoryboardContent.cast -> CastMember, defined later).
 StoryboardContent.model_rebuild()
+
+
+# --------------------------------------------------------------------------- #
+# Recut: redo picked parts of a film (app/api/redo.py)
+# --------------------------------------------------------------------------- #
+RecutKind = Literal["story", "look", "scene", "frame", "clip", "voice", "score", "release"]
+
+
+class RecutRef(BaseModel):
+    kind: RecutKind
+    unit: int | None = None  # scene number for scene/frame/clip/voice
+
+
+class TakeView(BaseModel):
+    id: str
+    cut: int  # the cut that replaced it
+    kind: str
+    unit: int | None = None
+    label: str
+    at: str
+    urls: list[str] = Field(default_factory=list)
+    restorable: bool = False
+
+
+class RecutShot(BaseModel):
+    size: str = "medium"
+    action: str = ""
+    camera: str = ""
+    seconds: float = 0.0
+    lines: list[SceneLine] = Field(default_factory=list)
+
+
+class RecutScene(BaseModel):
+    order: int
+    mode: str = "narration"
+    beat_role: str = ""
+    location: str = ""
+    planned_seconds: float = 0.0
+    seconds: float = 0.0  # the real clip length when filmed
+    description: str = ""
+    narration: str = ""
+    shots: list[RecutShot] = Field(default_factory=list)
+    frame_url: str | None = None
+    clip_url: str | None = None
+    voice_url: str | None = None
+    status: Literal["ok", "qc", "blocked", "missing", "pending"] = "pending"
+    issues: list[str] = Field(default_factory=list)
+    takes: list[TakeView] = Field(default_factory=list)
+
+
+class RecutFilmItem(BaseModel):
+    kind: str  # story | look | score | release
+    label: str
+    ready: bool = False
+    detail: str = ""
+    url: str | None = None
+    takes: list[TakeView] = Field(default_factory=list)
+    cues: list[float] = Field(default_factory=list)  # score: the cut points it was written for
+
+
+class CutView(BaseModel):
+    cut: int
+    kind: str = "recut"  # first | recut | restore
+    at: str = ""
+    summary: str = ""
+    note: str = ""
+    picked: list[str] = Field(default_factory=list)
+    items: list[str] = Field(default_factory=list)
+    cost_usd: float | None = None
+    scene_seconds: dict[str, float] = Field(default_factory=dict)
+    video_url: str | None = None
+    current: bool = False
+
+
+class RecutMap(BaseModel):
+    job_id: str
+    status: JobStatus
+    can_recut: bool
+    reason: str | None = None  # why not, when can_recut is false
+    language: str = "en"
+    title: str = ""
+    pipeline: list[str] = Field(default_factory=list)
+    kinds: list[str] = Field(default_factory=list)  # pickable kinds for this film
+    scenes: list[RecutScene] = Field(default_factory=list)
+    film: list[RecutFilmItem] = Field(default_factory=list)
+    cuts: list[CutView] = Field(default_factory=list)
+    cast: list[CastMember] = Field(default_factory=list)
+
+
+class RecutPlanRequest(BaseModel):
+    targets: list[RecutRef] = Field(min_length=1, max_length=40)
+    note: str = Field(default="", max_length=1500)
+
+
+class ShotDiff(BaseModel):
+    index: int
+    seconds: float = 0.0
+    size_before: str = ""
+    size_after: str = ""
+    action_before: str = ""
+    action_after: str = ""
+    lines_before: list[SceneLine] = Field(default_factory=list)
+    lines_after: list[SceneLine] = Field(default_factory=list)
+
+
+class SceneDiff(BaseModel):
+    order: int
+    description_before: str = ""
+    description_after: str = ""
+    redraw_frame: bool = False
+    shots: list[ShotDiff] = Field(default_factory=list)
+
+
+class RecutNote(BaseModel):
+    kind: str
+    text: str
+
+
+class RecutExtra(BaseModel):
+    kind: RecutKind
+    unit: int | None = None
+    label: str = ""
+    reason: str = ""
+    usd: float = 0.0
+
+
+class RecutEstimate(BaseModel):
+    usd: float = 0.0
+    seconds: int = 0
+
+
+class RecutPlanResponse(BaseModel):
+    plan_id: str | None = None  # set when the director planned edits
+    summary: str = ""
+    directed: bool = False
+    scenes: list[SceneDiff] = Field(default_factory=list)
+    notes: list[RecutNote] = Field(default_factory=list)
+    extra: list[RecutExtra] = Field(default_factory=list)
+    items: list[RecutRef] = Field(default_factory=list)  # everything that will be rebuilt
+    stages: list[str] = Field(default_factory=list)
+    estimate: RecutEstimate = Field(default_factory=RecutEstimate)
+    review_frames_available: bool = False  # new frames AND new clips: offer a check in between
+
+
+class RecutRequest(BaseModel):
+    plan_id: str | None = None
+    targets: list[RecutRef] = Field(default_factory=list)
+    accept_extra: list[RecutRef] = Field(default_factory=list)
+    review_frames: bool = True
+
+
+class RecutStarted(BaseModel):
+    job_id: str
+    status: JobStatus
+    cut: int

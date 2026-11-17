@@ -6,3 +6,4 @@
 </creative_brief>
 
 Runtime: {{ duration }}s in {{ n }} scenes. Style: {{ style }}. Language: {{ language }}. Write the screenplay that delivers this brief.
+{{ direction }}

@@ -49,7 +49,7 @@ def write_script(model: str, idea: str, duration: int, style: str, lang: str) ->
     s = get_settings()
     n = scenes_for_duration(duration, s.seconds_per_frame, style)
     system = _system_prompt(n, style, lang, duration / n)
-    user = render("script_writer/user", idea=idea, duration=duration, n=n, seconds=round(duration / n),
+    user = render("script_writer/user", direction="", idea=idea, duration=duration, n=n, seconds=round(duration / n),
                   style=style, language=LANGUAGE_NAMES[lang])
     t = time.time()
     try:

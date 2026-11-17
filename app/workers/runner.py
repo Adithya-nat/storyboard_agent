@@ -51,11 +51,12 @@ async def run_job(
     allow_stills: bool = False,
     api_key: str | None = None,
     user_id: str | None = None,
+    fresh: bool = False,
 ) -> None:
     key_token = bind_key(api_key)
     try:
         await _run_job(job_id, prompt, duration, resume, style, language, allow_motion, allow_stills,
-                       api_key, user_id)
+                       api_key, user_id, fresh)
     finally:
         release_key(api_key, key_token)
 
@@ -71,6 +72,7 @@ async def _run_job(
     allow_stills: bool,
     api_key: str | None,
     user_id: str | None,
+    fresh: bool = False,
 ) -> None:
     settings = get_settings()
     if api_key:  # BYOK: this job's own settings copy; the key is never written anywhere
@@ -159,7 +161,7 @@ async def _run_job(
 
                 final, paused = await _drive(
                     graph, init, config, resume, checkpointed=checkpointer is not None,
-                    control=deps.control, settle_pause=settle_pause,
+                    control=deps.control, settle_pause=settle_pause, fresh=fresh,
                 )
         except Exception as exc:  # noqa: BLE001 - any failure -> visible FAILED status
             log.exception("job %s failed", job_id)
@@ -186,7 +188,7 @@ async def _run_job(
 
 async def _drive(
     graph, init: dict, config: dict, resume: bool, *, checkpointed: bool,
-    control: RunControl | None = None, settle_pause=None,
+    control: RunControl | None = None, settle_pause=None, fresh: bool = False,
 ) -> tuple[dict, JobPaused | None]:
     """Run the graph; on a pause, park the job. Returns (final_state, pause_or_None).
 
@@ -201,7 +203,7 @@ async def _drive(
     job_id = init["job_id"]
     for _ in range(20):  # bounded: a withdraw/re-pause tug-of-war can't spin forever
         try:
-            return await _invoke(graph, init, config, resume, checkpointed=checkpointed), None
+            return await _invoke(graph, init, config, resume, checkpointed=checkpointed, fresh=fresh), None
         except JobPaused as paused:
             if settle_pause is not None:
                 await settle_pause()
@@ -214,11 +216,11 @@ async def _drive(
             if control is not None:
                 control.reset()  # else its cached "paused" answer re-pauses every retry
             log.info("job %s: pause withdrawn while draining; continuing from %s", job_id, paused.stage)
-            resume = True
+            resume, fresh = True, False
     raise RuntimeError("pause/resume toggled too many times in one run; resume it again")
 
 
-async def _invoke(graph, init: dict, config: dict, resume: bool, *, checkpointed: bool) -> dict:
+async def _invoke(graph, init: dict, config: dict, resume: bool, *, checkpointed: bool, fresh: bool = False) -> dict:
     """Run (or resume) the graph.
 
     Without a checkpointer: a plain idempotent invoke covers both fresh runs and
@@ -232,13 +234,15 @@ async def _invoke(graph, init: dict, config: dict, resume: bool, *, checkpointed
     - Resume with a finished/absent checkpoint: re-run from the start on a NEW
       thread so LangGraph actually re-executes; idempotent nodes reuse every
       existing artifact, so only the deleted/missing pieces are regenerated.
+    - ``fresh`` (a recut): always that new-thread re-run, since the saved checkpoint may sit
+      past a stage whose files the recut just replaced.
     """
     if not checkpointed:
         return await graph.ainvoke(init)
 
     if resume:
         snapshot = await graph.aget_state(config)
-        if snapshot.next:  # a node is pending -> continue from the checkpoint
+        if snapshot.next and not fresh:  # a node is pending -> continue from the checkpoint
             return await graph.ainvoke(None, config)
         fresh = {"configurable": {"thread_id": f"{init['job_id']}:r:{uuid4().hex[:8]}"}}
         return await graph.ainvoke(init, fresh)

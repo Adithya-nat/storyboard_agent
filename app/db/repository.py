@@ -390,6 +390,19 @@ async def list_jobs(session: AsyncSession, user_id: str | None, since: datetime,
 # Stages (job_stages): the live "which stage is running" summary.
 # Written by ProgressReporter with DIRECT awaited calls (reliable, low volume).
 # --------------------------------------------------------------------------- #
+async def reset_stages(session: AsyncSession, job_id: str, names: list[str]) -> None:
+    """A recut: these stages will run again (spend history is kept)."""
+    if not names:
+        return
+    await session.execute(
+        update(JobStage).where(JobStage.job_id == job_id, JobStage.name.in_(names)).values(
+            status="pending", message=None, progress_current=None, progress_total=None,
+            started_at=None, ended_at=None,
+        )
+    )
+    await session.commit()
+
+
 async def upsert_stage_running(
     session: AsyncSession, job_id: str, name: str, seq: int
 ) -> None:

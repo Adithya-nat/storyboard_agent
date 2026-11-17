@@ -14,6 +14,7 @@ from app.workers.control import JobPaused, PauseRequested, gate
 from app.core.logging import get_logger
 from app.graph.state import Deps, StoryboardState
 from app.prompts import render
+from app.agents.redo_director import direction
 from app.schemas import Script, Shot, Shotlist
 
 log = get_logger(__name__)
@@ -179,6 +180,7 @@ async def designer(state: StoryboardState, deps: Deps) -> StoryboardState:
                     script_json=script.model_dump_json(indent=2),
                     n=len(script.scenes),
                     first_order=script.scenes[0].order if script.scenes else 1,
+                    direction=direction(store, "look"),
                 ),
                 response_model=Shotlist,
                 role="designer",

@@ -6,6 +6,7 @@ import asyncio
 
 from app.core.logging import get_logger
 from app.agents.brief import mock_brief, normalize_brief, speech_block
+from app.agents.redo_director import direction
 from app.graph.state import SCENE_MAX_SECONDS, Deps, StoryboardState
 from app.prompts import render
 from app.schemas import LANGUAGE_NAMES, Character, CreativeBrief, DialogueLine, Scene, SceneShot, Script
@@ -237,7 +238,7 @@ async def script_writer(state: StoryboardState, deps: Deps) -> StoryboardState:
         user=render(
             "script_writer/user",
             idea=state["prompt"], brief_json=brief.model_dump_json(indent=2), duration=state["duration"],
-            n=n, style=style, language=lang_name,
+            n=n, style=style, language=lang_name, direction=direction(deps.store, "story"),
         ),
         response_model=Script,
         role="script",

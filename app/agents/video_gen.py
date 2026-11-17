@@ -192,6 +192,7 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
             save_manifest()  # survives an interruption: Resume never re-bills this clip
 
     held: set[int] = set()  # scenes a pause stopped before they were submitted
+    tried: dict[int, list[dict]] = {}  # rewrites that were still blocked, per scene
 
     async def gen(order: int, image: bytes, spec: SceneSpec):
         async with sem:
@@ -213,6 +214,7 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
                 log.warning("scene %s: rewrite failed (%s)", order, e)
                 break
             new_spec = apply_rescue(spec, rewrite)
+            tried.setdefault(order, []).append(rewrite.model_dump())
             log.info("scene %s: rewrite %d tried: %s", order, attempt, rewrite.change[:200])
             redraws = ((False, True) if attempt == 1 else (True,)) if deps.image is not None else (False,)
             for redraw in redraws:
@@ -238,6 +240,13 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
         if redraw:
             store.save_bytes(f"frame_{order:02d}.blocked.png", store.load_bytes(store.abspath(f"frame_{order:02d}.png")))
             store.save_bytes(f"frame_{order:02d}.png", img)
+            async with lock:  # a later frame redo draws the compliant picture, not the blocked one
+                sl = Shotlist.model_validate(store.load_json(state["shotlist_path"]))
+                for sh in sl.shots:
+                    if sh.order == order and rewrite.image_prompt.strip():
+                        sh.image_prompt = rewrite.image_prompt
+                store.save_json("shotlist.json", sl)
+        store.remove(f"rescue_{order:02d}.attempts.json")
         store.save_json(f"rescue_{order:02d}.json", {"code": code, "redrawn_frame": redraw, **rewrite.model_dump()})
         async with lock:  # keep the script panel truthful about what's said on screen
             s = Script.model_validate(store.load_json(state["script_path"]))
@@ -253,8 +262,14 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
                         sc.lines = sc.shot_lines() or sc.lines
             store.save_json("script.json", s)
 
+    kept = [f["order"] for f in frames if store.exists(f"motion_{f['order']:02d}.mp4")]
     if reporter is not None:
-        reporter.log(f"generating {total} AI video clip(s) with {deps.settings.omni_model_chain[0]}")
+        model = deps.settings.omni_model_chain[0]
+        todo = total - len(kept)
+        reporter.log(
+            f"filming {todo} AI clip(s) with {model}; {len(kept)} kept from before ({', '.join(map(str, kept))})"
+            if kept else f"generating {total} AI video clip(s) with {model}"
+        )
         await reporter.progress(0, total)
 
     async def one(frame) -> None:
@@ -262,6 +277,7 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
         order = frame["order"]
         name = f"motion_{order:02d}.mp4"
         sc = scenes.get(order)
+        resumed_from = None
         try:
             if store.exists(name) and order in prior:  # resume: never re-bill a finished clip
                 clips[order] = MotionClipMeta(**prior[order])
@@ -295,9 +311,18 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
             )
             if store.exists(f"rescue_{order:02d}.json"):  # resume: start from the accepted rewrite
                 spec = apply_rescue(spec, store.load_json(store.abspath(f"rescue_{order:02d}.json")))
+            elif store.exists(f"rescue_{order:02d}.attempts.json"):  # blocked last time: start from its last rewrite
+                attempts = store.load_json(store.abspath(f"rescue_{order:02d}.attempts.json"))
+                last = (attempts.get("rewrites") or [None])[-1]
+                if last:
+                    resumed_from = (SceneRescue.model_validate(last), attempts.get("code") or "")
+                    spec = apply_rescue(spec, last)
+                    await note(f"scene {order}: starting from its last rewrite instead of the blocked original")
             image = store.load_bytes(frame["path"])
             try:
                 clip, info = await gen(order, image, spec), None
+                if resumed_from is not None:  # the earlier rewrite went through this time
+                    info = (resumed_from[0], False, image, resumed_from[1])
             except ContentBlocked as exc:
                 clip, info = await rescue(order, image, spec, exc)
             path = store.save_bytes(name, clip.data)
@@ -318,6 +343,12 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
         except ContentBlocked as exc:
             log.warning("AI video for scene %s still blocked after rewrites (%s)", order, exc)
             blocked[order] = exc
+            prev = store.load_json(store.abspath(f"rescue_{order:02d}.attempts.json")) \
+                if store.exists(f"rescue_{order:02d}.attempts.json") else {}
+            store.save_json(f"rescue_{order:02d}.attempts.json", {
+                "code": exc.code, "message": str(exc)[:500],
+                "rewrites": (prev.get("rewrites") or []) + tried.get(order, []),
+            })
             warnings.append(f"video: scene {order} blocked by Google's {_label(exc.code)}")
         except ProviderError as exc:
             log.warning("AI video for scene %s failed (%s); keeping the still", order, exc)
