@@ -189,9 +189,11 @@ Good for a small beta. The studio is online only while the computer is on, awake
 3. Your address is `<computer>.<tailnet>.ts.net` (shown in the Tailscale app). In `deploy/.env`
    set `APP_DOMAIN=<that address>`, `API_DOMAIN=<that address>:8443`, and `WEB_DIR=` the
    absolute path of your `creator-agent-web` checkout.
-4. Start only the API and the web app; Funnel replaces Caddy:
+4. Start only the API and the web app; Funnel replaces Caddy. On a Mac, `make host-up` does
+   all of this, plus starting the egress proxy described below:
 
    ```bash
+   make host-proxy    # Mac only; see "Docker Desktop and large uploads"
    docker compose -p creator-agent-host -f deploy/compose.prod.yml -f deploy/compose.laptop.yml \
      --env-file deploy/.env up -d --build api web
    tailscale funnel --bg --https=443  http://127.0.0.1:3300    # studio
@@ -209,6 +211,14 @@ bandwidth is limited by Tailscale (unpublished), which is fine for testers watch
 
 **Check:** `https://<address>:8443/health` shows `"auth_mode":"jwt"`, and `https://<address>`
 redirects to the sign-in page.
+
+**Docker Desktop and large uploads.** On a Mac, Docker Desktop's outbound network corrupts
+some large TLS uploads. Frames and video requests then fail with `SSLV3_ALERT_BAD_RECORD_MAC`.
+To avoid this, `compose.laptop.yml` sends the API's HTTPS traffic through
+`deploy/egress_proxy.py`, a small proxy that launchd keeps running on `127.0.0.1:18443`.
+TLS stays end to end and the proxy only relays port 443. `make host-status` shows whether it's
+up, and its log is `~/Library/Logs/creator-agent-egress.log`. If the proxy is down, every
+Google call fails, so run `make host-proxy`.
 
 ### Other options
 

@@ -6,5 +6,8 @@ services:
     ports: ["127.0.0.1:8300:8000"]
     environment:
       AUTH_JWKS_URL: http://web:3000/api/auth/jwks   # fetch keys inside Docker, not back through the tunnel
+      # Docker Desktop corrupts some large TLS uploads; send HTTPS out via deploy/egress_proxy.py on the Mac.
+      HTTPS_PROXY: http://host.docker.internal:18443
+      NO_PROXY: localhost,127.0.0.1,web,api
   web:
     ports: ["127.0.0.1:3300:3000"]

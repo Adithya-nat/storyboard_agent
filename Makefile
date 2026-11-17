@@ -24,7 +24,7 @@ VOICE_NAME ?= Creator Agent narrator
 .PHONY: help setup install install-web env db-up db-down db-logs db-shell migrate db-reset \
         dev api api-reload web web-prod stop status health budget open logs \
         doctor doctor-live voice test test-cov test-live test-web typecheck lint build-web check \
-        evals evals-mock probe-g1 host-up host-down host-idle host-status host-logs bakeoff-images bakeoff-scripts diagram clean clean-artifacts
+        evals evals-mock probe-g1 host-up host-down host-idle host-proxy host-status host-logs bakeoff-images bakeoff-scripts diagram clean clean-artifacts
 
 ##@ Getting started
 help: ## Show this list
@@ -172,6 +172,7 @@ TAILSCALE ?= $(or $(shell command -v tailscale),/Applications/Tailscale.app/Cont
 
 host-up: ## Build + start the hosted copy and publish it (refuses mid-film unless FORCE=1)
 	@$(MAKE) --no-print-directory host-idle
+	@$(MAKE) --no-print-directory host-proxy
 	$(HOST) up -d --build api web
 	$(TAILSCALE) funnel --bg --https=443 http://127.0.0.1:3300
 	$(TAILSCALE) funnel --bg --https=8443 http://127.0.0.1:8300
@@ -180,13 +181,43 @@ host-down: ## Stop the hosted copy and take it offline (refuses mid-film unless 
 	@$(MAKE) --no-print-directory host-idle
 	-$(TAILSCALE) funnel reset
 	$(HOST) down
+	-@launchctl bootout gui/$$(id -u)/$(PROXY_LABEL) 2>/dev/null
 
 host-idle: ## Fail if a film is rendering on the hosted copy (FORCE=1 skips)
 	@if [ "$(FORCE)" != "1" ] && $(HOST) ps --status running --services 2>/dev/null | grep -qx api; then \
 	  $(HOST) exec -T api python -m app.workers.active_count; fi
 
+# Docker Desktop corrupts some large TLS uploads, so the api sends HTTPS through a loopback
+# proxy on the Mac (deploy/egress_proxy.py), kept alive by launchd. It is copied out of
+# ~/Documents because launchd jobs can't read there.
+PROXY_LABEL := com.creator-agent.egress-proxy
+PROXY_PORT  := 18443
+PROXY_DIR   := $(HOME)/Library/Application Support/creator-agent
+PROXY_PLIST := $(HOME)/Library/LaunchAgents/$(PROXY_LABEL).plist
+
+host-proxy: ## Install/start the Mac egress proxy the hosted api uses (no-op if current)
+	@mkdir -p "$(PROXY_DIR)" "$(HOME)/Library/LaunchAgents" "$(HOME)/Library/Logs"
+	@if cmp -s deploy/egress_proxy.py "$(PROXY_DIR)/egress_proxy.py" && nc -z 127.0.0.1 $(PROXY_PORT) 2>/dev/null; then \
+	  echo "egress proxy running on 127.0.0.1:$(PROXY_PORT)"; exit 0; fi; \
+	cp deploy/egress_proxy.py "$(PROXY_DIR)/egress_proxy.py"; \
+	printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+	  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+	  '<plist version="1.0"><dict>' \
+	  '<key>Label</key><string>$(PROXY_LABEL)</string>' \
+	  '<key>ProgramArguments</key><array><string>/usr/bin/python3</string>' \
+	  '<string>$(PROXY_DIR)/egress_proxy.py</string><string>$(PROXY_PORT)</string></array>' \
+	  '<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>' \
+	  '<key>StandardOutPath</key><string>$(HOME)/Library/Logs/creator-agent-egress.log</string>' \
+	  '<key>StandardErrorPath</key><string>$(HOME)/Library/Logs/creator-agent-egress.log</string>' \
+	  '</dict></plist>' > "$(PROXY_PLIST)"; \
+	launchctl bootout gui/$$(id -u)/$(PROXY_LABEL) 2>/dev/null; sleep 1; \
+	launchctl bootstrap gui/$$(id -u) "$(PROXY_PLIST)"; \
+	for i in $$(seq 1 20); do nc -z 127.0.0.1 $(PROXY_PORT) 2>/dev/null && { echo "egress proxy started on 127.0.0.1:$(PROXY_PORT)"; exit 0; }; sleep 0.25; done; \
+	echo "egress proxy didn't start; see ~/Library/Logs/creator-agent-egress.log"; exit 1
+
 host-status: ## Containers, health and what Funnel publishes
 	@$(HOST) ps --format '{{.Service}}: {{.Status}}'
+	@nc -z 127.0.0.1 $(PROXY_PORT) 2>/dev/null && echo "egress proxy: up" || echo "egress proxy: DOWN (make host-proxy)"
 	@curl -fsS localhost:8300/health && echo || echo "API not answering on :8300"
 	@$(TAILSCALE) funnel status
 
