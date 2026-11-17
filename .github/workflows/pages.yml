@@ -30,6 +30,11 @@ jobs:
           APP_URL: ${{ vars.APP_URL }}
           API_URL: ${{ vars.API_URL }}
         run: |
+          # Empty values ship a homepage whose sign-in and film library silently do nothing.
+          if [ -z "$APP_URL" ] || [ -z "$API_URL" ]; then
+            echo "::error::Repo variables APP_URL and API_URL must be set (run 'make host-pages' on the host)."
+            exit 1
+          fi
           printf 'window.CREATOR_AGENT = { appUrl: %s, apiUrl: %s };\n' \
             "$(jq -Rn --arg u "$APP_URL" '$u')" "$(jq -Rn --arg u "$API_URL" '$u')" > site/config.js
           cat site/config.js

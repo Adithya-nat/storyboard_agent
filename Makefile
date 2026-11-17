@@ -24,7 +24,7 @@ VOICE_NAME ?= Creator Agent narrator
 .PHONY: help setup install install-web env db-up db-down db-logs db-shell migrate db-reset \
         dev api api-reload web web-prod stop status health budget open logs \
         doctor doctor-live voice test test-cov test-live test-web typecheck lint build-web check \
-        evals evals-mock probe-g1 host-up host-down host-idle host-proxy host-status host-logs bakeoff-images bakeoff-scripts diagram clean clean-artifacts
+        evals evals-mock probe-g1 host-up host-down host-idle host-proxy host-pages host-status host-logs bakeoff-images bakeoff-scripts diagram clean clean-artifacts
 
 ##@ Getting started
 help: ## Show this list
@@ -176,6 +176,19 @@ host-up: ## Build + start the hosted copy and publish it (refuses mid-film unles
 	$(HOST) up -d --build api web
 	$(TAILSCALE) funnel --bg --https=443 http://127.0.0.1:3300
 	$(TAILSCALE) funnel --bg --https=8443 http://127.0.0.1:8300
+	@$(MAKE) --no-print-directory host-pages || echo "warning: homepage not updated (is gh signed in?)"
+
+# The homepage (GitHub Pages) reads APP_URL/API_URL repo variables to link sign-in and load
+# published films. deploy/.env is the source of truth; this copies it over and redeploys only
+# when something changed.
+host-pages: ## Point the homepage at this hosted copy (repo vars from deploy/.env)
+	@app="https://$$(sed -n 's/^APP_DOMAIN=//p' deploy/.env)"; api="https://$$(sed -n 's/^API_DOMAIN=//p' deploy/.env)"; \
+	if [ "$$(gh variable get APP_URL 2>/dev/null)" = "$$app" ] && [ "$$(gh variable get API_URL 2>/dev/null)" = "$$api" ]; then \
+	  echo "homepage already points at $$api"; \
+	else \
+	  gh variable set APP_URL --body "$$app" && gh variable set API_URL --body "$$api" && \
+	  gh workflow run pages.yml && echo "homepage redeploying -> app $$app, api $$api"; \
+	fi
 
 host-down: ## Stop the hosted copy and take it offline (refuses mid-film unless FORCE=1)
 	@$(MAKE) --no-print-directory host-idle
