@@ -53,7 +53,7 @@ def test_xfade_offsets_make_total_equal_target():
     for expected in ("offset=1.600", "offset=3.200", "offset=4.800"):
         assert expected in fc
     # total = n*hold - (n-1)*d = 8 - 1.2 = 6.8 ; last transition 4.8 + hold 2.0 = 6.8
-    assert "[0:v][1:v]xfade" in fc and "[x1][2:v]xfade" in fc
+    assert "[s0][s1]xfade" in fc and "[x1][s2]xfade" in fc
 
 
 # --------------------------------------------------------------------------- #
@@ -137,7 +137,9 @@ def test_hard_cuts_concat_and_dissolves_xfade():
 
     holds = [3.0, 2.0, 4.0]
     fc, final = _xfade_filter(3, holds, [0.0, 0.5])
-    assert "[0:v][1:v]concat=n=2:v=1:a=0[x1]" in fc and "[x1][2:v]xfade=transition=fade:duration=0.500:offset=4.500" in fc
+    assert "[s0][s1]concat=n=2:v=1:a=0[x1]" in fc and "[x1][s2]xfade=transition=fade:duration=0.500:offset=4.500" in fc
+    # every input shares one timebase, or xfade rejects concat's AVTB output
+    assert all(f"[{j}:v]settb=AVTB[s{j}]" in fc for j in range(3))
     assert xfade_offsets(holds, [0.0, 0.5]) == [0.0, 3.0, 4.5]  # audio lands on the same cuts
 
 
@@ -148,6 +150,17 @@ async def test_hard_cut_edit_keeps_full_runtime(tmp_path):
     await assemble_kenburns(clips, str(out), crossfade=[0.0, 0.0])
     _w, _h, dur = _probe(str(out))
     assert abs(dur - 6.0) < 0.3  # no overlap lost to fades
+
+
+@_needs_ffmpeg
+async def test_dissolve_after_hard_cut_renders(tmp_path):
+    # Regression: concat -> xfade used to fail with a timebase mismatch.
+    clips = _clips(tmp_path, 4, hold=2.0)
+    out = tmp_path / "mixed.mp4"
+    await assemble_kenburns(clips, str(out), crossfade=[0.0, 0.4, 0.0])
+    w, h, dur = _probe(str(out))
+    assert (w, h) == (720, 1280)
+    assert abs(dur - 7.6) < 0.3  # 4*2.0 - one 0.4 dissolve
 
 
 @_needs_ffmpeg

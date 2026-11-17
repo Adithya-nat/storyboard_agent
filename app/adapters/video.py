@@ -391,18 +391,23 @@ def concat_offsets(holds: list[float]) -> list[float]:
 
 
 def _xfade_filter(n: int, holds: list[float], d: float | list[float]) -> tuple[str, str]:
-    """Chained filter_complex: hard cuts concat, dissolves xfade, at ``xfade_offsets``."""
+    """Chained filter_complex: hard cuts concat, dissolves xfade, at ``xfade_offsets``.
+
+    Every input is normalized to one timebase first: concat outputs AVTB (1/1000000)
+    while the clips are 1/15360, and xfade refuses inputs whose timebases differ, so a
+    dissolve after a hard cut would fail. settb only relabels timestamps (no re-encode).
+    """
     offsets, ov = xfade_offsets(holds, d), _overlaps(n, d)
-    parts: list[str] = []
-    prev = "0:v"
+    parts = [f"[{j}:v]settb=AVTB[s{j}]" for j in range(n)]
+    prev = "s0"
     for j in range(1, n):
         out_label = f"x{j}"
         if ov[j] > 0:
             parts.append(
-                f"[{prev}][{j}:v]xfade=transition=fade:duration={ov[j]:.3f}:offset={offsets[j]:.3f}[{out_label}]"
+                f"[{prev}][s{j}]xfade=transition=fade:duration={ov[j]:.3f}:offset={offsets[j]:.3f}[{out_label}]"
             )
         else:
-            parts.append(f"[{prev}][{j}:v]concat=n=2:v=1:a=0[{out_label}]")
+            parts.append(f"[{prev}][s{j}]concat=n=2:v=1:a=0[{out_label}]")
         prev = out_label
     return ";".join(parts), prev
 
