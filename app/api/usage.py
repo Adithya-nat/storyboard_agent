@@ -19,6 +19,9 @@ from app.observability.budget import budget_status, estimate
 router = APIRouter(tags=["usage"])
 
 Range = Literal["7d", "30d", "month", "all"]
+# "me" = the caller's own runs; "all" = every user of this deployment, as aggregates only
+# (no prompts, no per-user rows; the runs list stays private to its owner).
+Scope = Literal["me", "all"]
 
 
 class RunRow(BaseModel):
@@ -46,6 +49,8 @@ class RunRow(BaseModel):
 
 class UsageSummary(BaseModel):
     range: str
+    scope: str = "me"
+    creators: int = 0  # distinct users with a run in range
     runs: int
     completed_runs: int
     success_rate: float
@@ -101,11 +106,15 @@ async def get_runs(
 
 @router.get("/usage/summary", response_model=UsageSummary)
 async def get_summary(
-    range: Range = "30d", session: AsyncSession = Depends(get_session), user: User = Depends(allowed_user)
+    range: Range = "30d",
+    scope: Scope = "me",
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(allowed_user),
 ) -> UsageSummary:
     since = _since(range)
-    runs = await repo.runs_since(session, since, user.scope)
-    events = await repo.spend_events_since(session, since, user.scope)
+    user_id = None if scope == "all" else user.scope
+    runs = await repo.runs_since(session, since, user_id)
+    events = await repo.spend_events_since(session, since, user_id)
     finished = [r for r in runs if r.finished_at is not None]
     completed = [r for r in finished if r.status.startswith("completed")]
     total = sum(e.cost_usd for e in events)
@@ -134,6 +143,8 @@ async def get_summary(
     seconds = sum(r.duration for r in completed)
     return UsageSummary(
         range=range,
+        scope=scope,
+        creators=len({r.user_id or "local" for r in runs}),
         runs=len(runs),
         completed_runs=len(completed),
         success_rate=round(len(completed) / len(finished), 4) if finished else 0.0,

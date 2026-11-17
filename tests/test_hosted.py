@@ -21,6 +21,7 @@ from app.core.config import get_settings
 from app.core.keys import REDACTED, RedactKeysFilter, bind_key, current_scope, release_key
 from app.db import repository as repo
 from app.db.models import Job, RunLedger
+from app.db.models import SpendEvent as SpendEventRow
 from app.db.session import get_sessionmaker
 from app.graph.checkpoint import purge_checkpoints
 from app.main import app
@@ -134,6 +135,21 @@ async def test_usage_is_scoped_to_the_user(hosted, client):
         await repo.upsert_run(s, "j2", user_id="u2", prompt="b")
     rows = (await client.get("/usage/runs", headers=bearer())).json()
     assert [r["job_id"] for r in rows] == ["j1"]
+
+
+async def test_usage_summary_scope_all_aggregates_every_user(hosted, client):
+    async with get_sessionmaker()() as s:
+        for jid, uid, usd in (("j1", "u1", 2.0), ("j2", "u2", 3.0), ("j3", "u3", 5.0)):
+            await repo.upsert_run(s, jid, user_id=uid, prompt="secret " + uid, status="completed",
+                                  cost_usd=usd, finished_at=datetime.now(timezone.utc))
+            s.add(SpendEventRow(job_id=jid, user_id=uid, category="video", provider="google", model="m", cost_usd=usd))
+        await s.commit()
+    me = (await client.get("/usage/summary?range=all", headers=bearer())).json()
+    everyone = (await client.get("/usage/summary?range=all&scope=all", headers=bearer())).json()
+    assert (me["scope"], me["runs"], me["total_cost_usd"], me["creators"]) == ("me", 1, 2.0, 1)
+    assert (everyone["scope"], everyone["runs"], everyone["total_cost_usd"], everyone["creators"]) == ("all", 3, 10.0, 3)
+    assert "secret" not in json.dumps(everyone)  # aggregates only, never another user's prompt
+    assert (await client.get("/usage/summary?scope=team", headers=bearer())).status_code == 422
 
 
 # --- media links ------------------------------------------------------------------------ #
