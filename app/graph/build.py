@@ -9,6 +9,7 @@ reporter is set; deps are bound with functools.partial so state stays serializab
 
 from __future__ import annotations
 
+import asyncio
 import functools
 
 from langgraph.graph import END, START, StateGraph
@@ -94,6 +95,7 @@ def _instrument(name: str, seq: int, fn, reporter, deps=None):
             # Stage boundary: honour a breakpoint on this stage, or a pause that landed
             # after the previous stage's last unit, BEFORE anything here spends.
             if control is not None:
+                control.stage = name
                 if await control.take_breakpoint(name):
                     raise JobPaused(name, "Stopped at your checkpoint, before this stage", breakpoint=True)
                 if await control.requested():
@@ -118,15 +120,23 @@ def _instrument(name: str, seq: int, fn, reporter, deps=None):
                 await publish(job_id, {**state, **result})
             return result
         except JobPaused as p:
-            await reporter.stage_pause(job_id, name, seq, p.message)
-            raise  # the runner parks the job
+            if control is not None:
+                control.held = (name, seq, p.message)
+            raise  # the runner marks the stage paused and parks the job
+        except asyncio.CancelledError:
+            # Instant pause: the runner cancelled the graph mid-stage. Paid calls in flight
+            # finish on their own (control.keep); the rest of this stage is redone on resume.
+            if control is not None and control.held is None:
+                control.held = (name, seq, "Paused partway through; finished work is kept")
+            raise
         except Exception as exc:
             await reporter.stage_fail(job_id, name, exc)
             raise  # re-raise unchanged so the runner still sets the job FAILED
         finally:
             # Persist this stage's token total live (best-effort), then clear the stage
             # binding so attribution can't bleed into the next node.
-            await reporter.record_stage_tokens(job_id, name)
+            # Shielded: a pause landing now mustn't drop the spend this write carries.
+            await asyncio.shield(reporter.record_stage_tokens(job_id, name))
             reset_stage(token)
 
     return wrapped

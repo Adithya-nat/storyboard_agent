@@ -7,9 +7,10 @@ Each finished clip is recorded in the manifest immediately, so an interruption n
 re-bills it.
 
 Pause: a scene passes the run-control gate after it gets a concurrency slot and before
-it submits. Once a pause is requested, scenes already submitted finish (they're billed
-either way) and are kept; queued scenes don't start. The stage then raises ``JobPaused``,
-and a resume starts at the first scene without a clip.
+it submits, so queued scenes never start once a pause is requested. A scene already
+submitted is billed either way, so it runs under ``keep()``: when a pause cancels the
+stage it finishes in the background and its clip is saved and recorded. A resume starts
+at the first scene without a clip.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from app.core.logging import get_logger
 from app.graph.state import Deps, MotionClipMeta, StoryboardState
 from app.prompts import render
 from app.schemas import Script, Shotlist
-from app.workers.control import PauseRequested, gate, interruptible_sleep, paused, track
+from app.workers.control import PauseRequested, gate, interruptible_sleep, keep, paused, track
 
 log = get_logger(__name__)
 
@@ -272,6 +273,30 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
         )
         await reporter.progress(0, total)
 
+    async def film(order: int, image: bytes, spec: SceneSpec, resumed_from) -> None:
+        """Submit one scene and keep its clip (saved + recorded), even if a pause lands mid-render."""
+        try:
+            clip, info = await gen(order, image, spec), None
+            if resumed_from is not None:  # the earlier rewrite went through this time
+                info = (resumed_from[0], False, image, resumed_from[1])
+        except ContentBlocked as exc:
+            clip, info = await rescue(order, image, spec, exc)
+        path = store.save_bytes(f"motion_{order:02d}.mp4", clip.data)
+        if info is not None:
+            await save_rescue(order, info)
+        blocked.pop(order, None)
+        await record(order, MotionClipMeta(
+            order=order, path=path, status="ok", tier="omni", motion_kind="generative",
+            renderer="omni", model=clip.model, source_seconds=float(clip.seconds),
+            pipeline_version=MANIFEST_VERSION, attempts=[],
+            motion_reason="rewritten to meet content rules" if info else None,
+            has_audio=has_audio(path), qc=list(clip.qc), renders=clip.renders,
+        ))
+        if reporter is not None:
+            shots_note = f", {len(spec.shots)} shots" if len(spec.shots) > 1 else ""
+            qc_note = f"; QC: {'; '.join(clip.qc)}" if clip.qc else ""
+            reporter.log(f"scene {order}/{total}: {clip.seconds}s clip{shots_note} ({clip.model}, {clip.renders} render(s)){qc_note}")
+
     async def one(frame) -> None:
         nonlocal done
         order = frame["order"]
@@ -318,28 +343,7 @@ async def video_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
                     resumed_from = (SceneRescue.model_validate(last), attempts.get("code") or "")
                     spec = apply_rescue(spec, last)
                     await note(f"scene {order}: starting from its last rewrite instead of the blocked original")
-            image = store.load_bytes(frame["path"])
-            try:
-                clip, info = await gen(order, image, spec), None
-                if resumed_from is not None:  # the earlier rewrite went through this time
-                    info = (resumed_from[0], False, image, resumed_from[1])
-            except ContentBlocked as exc:
-                clip, info = await rescue(order, image, spec, exc)
-            path = store.save_bytes(name, clip.data)
-            if info is not None:
-                await save_rescue(order, info)
-            blocked.pop(order, None)
-            await record(order, MotionClipMeta(
-                order=order, path=path, status="ok", tier="omni", motion_kind="generative",
-                renderer="omni", model=clip.model, source_seconds=float(clip.seconds),
-                pipeline_version=MANIFEST_VERSION, attempts=[],
-                motion_reason="rewritten to meet content rules" if info else None,
-                has_audio=has_audio(path), qc=list(clip.qc), renders=clip.renders,
-            ))
-            if reporter is not None:
-                shots_note = f", {len(spec.shots)} shots" if len(spec.shots) > 1 else ""
-                qc_note = f"; QC: {'; '.join(clip.qc)}" if clip.qc else ""
-                reporter.log(f"scene {order}/{total}: {clip.seconds}s clip{shots_note} ({clip.model}, {clip.renders} render(s)){qc_note}")
+            await keep(deps, lambda: film(order, store.load_bytes(frame["path"]), spec, resumed_from))
         except ContentBlocked as exc:
             log.warning("AI video for scene %s still blocked after rewrites (%s)", order, exc)
             blocked[order] = exc

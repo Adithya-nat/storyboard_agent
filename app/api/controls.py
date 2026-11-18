@@ -1,11 +1,11 @@
 """Run controls: pause a running film, set breakpoints, and see what resuming costs.
 
-    POST /storyboard/{id}/pause        -> 202 {status: pausing}  (in-flight paid units finish)
+    POST /storyboard/{id}/pause        -> 202 {status: pausing}  (parks within moments)
     PUT  /storyboard/{id}/breakpoints  -> 200 {breakpoints}      (stages to pause BEFORE)
     GET  /storyboard/{id}/checkpoint   -> 200 Checkpoint         (per-unit state + cost to finish)
 
-Resume stays on POST /storyboard/{id}/resume (routes.py). Called while a pause is still
-draining, it withdraws the pause and the same runner carries on.
+Resume stays on POST /storyboard/{id}/resume (routes.py). Called in the moment before the
+job parks, it withdraws the pause and the same runner carries on.
 
 The checkpoint is read from disk, the same source of truth the stages use to skip
 finished work. So "done" here means "won't be paid for again", by construction.
@@ -51,8 +51,9 @@ _FRAME_IMAGE_TOKENS = 1290
 async def pause_storyboard(
     job_id: str, session: AsyncSession = Depends(get_session), user: User = Depends(allowed_user)
 ) -> dict:
-    """Stop starting new paid work. Units already submitted finish and are kept, then the
-    job parks as ``paused``. Idempotent while pausing or paused."""
+    """Pause now: the runner stops the current step and parks the job as ``paused``. Paid
+    calls already submitted finish in the background and are kept (checkpoint ``in_flight``).
+    Idempotent while pausing or paused."""
     job = await _load_owned_job(session, job_id, user)
     if job.status in (JobStatus.PAUSING.value, JobStatus.PAUSED.value):
         return {"job_id": job_id, "status": job.status}

@@ -35,7 +35,7 @@ from pydantic import BaseModel
 from app.observability import usage
 from app.prompts import render
 from app.schemas import Shot, Shotlist
-from app.workers.control import PauseRequested, gate, paused, track
+from app.workers.control import PauseRequested, gate, keep, paused
 
 log = get_logger(__name__)
 
@@ -91,17 +91,11 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
                     held.add(shot.order)
                     return
                 try:
-                    with track(deps, "image_gen", shot.order):
-                        raw = await _render_shot(shot)
+                    raw = await keep(deps, lambda: _render_and_save(shot), "image_gen", shot.order)
                     clean_bytes[shot.order] = raw
                     if reporter is not None:
                         reporter.log(f"frame {shot.order}/{total}: generated")
-                        # Live preview: save + publish the clean frame now (Phase C
-                        # re-saves the same bytes, so the end result is unchanged).
-                        frame_name = f"frame_{shot.order:02d}.png"
-                        path = store.save_bytes(frame_name, raw)
-                        store.remove(f"frame_{shot.order:02d}.degraded")
-                        await reporter.publish_frame(shot.order, path)
+                        await reporter.publish_frame(shot.order, store.abspath(frame_name))
                 except ProviderError as exc:
                     # The bridge captures this log.warning into job_logs (image_gen
                     # stage) via the contextvar — no explicit reporter.log needed.
@@ -110,6 +104,13 @@ async def image_gen(state: StoryboardState, deps: Deps) -> StoryboardState:
         done += 1  # single-threaded event loop: safe (no await between read+write)
         if reporter is not None:
             await reporter.progress(done, total)
+
+    async def _render_and_save(shot: Shot) -> bytes:
+        # Saved straight away so a pause can't lose a paid frame (Phase C re-saves the same bytes).
+        raw = await _render_shot(shot)
+        store.save_bytes(f"frame_{shot.order:02d}.png", raw)
+        store.remove(f"frame_{shot.order:02d}.degraded")
+        return raw
 
     async def _render_shot(shot: Shot) -> bytes:
         raw = await asyncio.to_thread(

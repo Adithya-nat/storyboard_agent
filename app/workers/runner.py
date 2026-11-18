@@ -3,14 +3,16 @@
 Atomic acquire -> run graph (checkpointer when available) -> persist artifacts, status,
 tokens, spend and the run-ledger row. Resume re-runs idempotent nodes cheaply.
 
-Pause: a stage raises ``JobPaused`` once its in-flight paid units have drained (see
-app/workers/control.py). The runner then parks the job as ``paused``, unless the pause
-was withdrawn while draining, in which case it carries straight on from the same spot.
+Pause: the runner cancels the graph the moment a pause is requested and parks the job
+as ``paused`` (see app/workers/control.py). Paid calls already submitted finish in the
+background; the runner books their spend once they land. A breakpoint parks the job the
+same way, before its stage starts.
 """
 
 from __future__ import annotations
 
-from contextlib import AsyncExitStack
+import asyncio
+from contextlib import AsyncExitStack, suppress
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -35,7 +37,7 @@ from app.graph.state import Deps
 from app.observability.reporter import ProgressReporter
 from app.observability.usage import UsageCollector, bind_collector, reset_collector
 from app.schemas import JobStatus
-from app.workers.control import JobPaused, RunControl, clear_pause, forget
+from app.workers.control import JobPaused, RunControl, clear_pause, forget, settle
 
 log = get_logger(__name__)
 
@@ -155,6 +157,8 @@ async def _run_job(
                 async def settle_pause() -> None:
                     # Every write this runner owes happens BEFORE the job becomes
                     # resumable, so a fast resume's new run can't be overwritten.
+                    if deps.control.held is not None:  # written here: the graph can't be cancelled mid-write
+                        await deps.reporter.stage_pause(job_id, *deps.control.held)
                     async with sessionmaker() as session:
                         await _persist_tokens(session, job_id, collector)
                     await _finish_ledger(job_id, {}, collector, JobStatus.PAUSED.value, started)
@@ -174,8 +178,9 @@ async def _run_job(
             await _finish_ledger(job_id, {}, collector, "failed", started)
             return
         if paused is not None:
-            # Parked: a resume may already own this job, so touch nothing shared after this.
+            # Parked: a resume may already own this job, so only additive writes from here.
             log.info("job %s paused at %s: %s", job_id, paused.stage, paused.message)
+            await _book_late_spend(job_id, collector)
             return
     finally:
         reset_collector(usage_token)
@@ -194,20 +199,24 @@ async def _drive(
 
     Before parking, the runner finishes every write it owes (``settle_pause``) and drops
     its in-memory state: once ``park_job`` commits, a resume can start a new runner at
-    any moment, and nothing of this one may land after that.
+    any moment, and only additive writes of this one may land after that.
 
-    If the pause was withdrawn while in-flight units drained, ``park_job`` refuses
-    (the flag is gone) and we simply continue: as a resume, so finished nodes and
-    units are skipped and nothing is re-billed.
+    If the pause was withdrawn before the job parked, ``park_job`` refuses (the flag is
+    gone) and we simply continue: as a resume, so finished nodes and units are skipped
+    and nothing is re-billed.
     """
     job_id = init["job_id"]
     for _ in range(20):  # bounded: a withdraw/re-pause tug-of-war can't spin forever
+        # Paid calls an earlier pause left running land on disk first, so this run
+        # sees them as done instead of paying for them again.
+        await settle(job_id)
         try:
-            return await _invoke(graph, init, config, resume, checkpointed=checkpointed, fresh=fresh), None
+            run = _invoke(graph, init, config, resume, checkpointed=checkpointed, fresh=fresh)
+            return await _until_paused(run, control), None
         except JobPaused as paused:
             if settle_pause is not None:
                 await settle_pause()
-            forget(job_id)  # in-flight units have drained; signals are re-created on demand
+            forget(job_id)  # signals are re-created on demand; units still landing stay listed
             async with get_sessionmaker()() as session:
                 if await repo.park_job(session, job_id):
                     return {}, paused
@@ -218,6 +227,40 @@ async def _drive(
             log.info("job %s: pause withdrawn while draining; continuing from %s", job_id, paused.stage)
             resume, fresh = True, False
     raise RuntimeError("pause/resume toggled too many times in one run; resume it again")
+
+
+async def _until_paused(run, control: RunControl | None) -> dict:
+    """Await the graph, cancelling it the moment a pause is requested (JobPaused)."""
+    if control is None:
+        return await run
+    task = asyncio.ensure_future(run)
+    watch = asyncio.ensure_future(control.until_requested())
+    try:
+        done, _ = await asyncio.wait({task, watch}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        watch.cancel()
+        if not task.done():
+            task.cancel()  # a pause, or this runner itself was cancelled
+            with suppress(asyncio.CancelledError, JobPaused):
+                await task
+    if task in done or not task.cancelled():
+        return task.result()  # finished (or failed, or hit a breakpoint) first
+    raise JobPaused(control.stage, "Paused partway through; finished work is kept")
+
+
+async def _book_late_spend(job_id: str, collector: UsageCollector) -> None:
+    """After parking: wait for paid calls still in flight, then record what they cost.
+    Spend rows are additive and job cost is their sum, so this is safe beside a resume."""
+    await settle(job_id)
+    events = collector.drain_events()
+    if not events:
+        return
+    try:
+        async with get_sessionmaker()() as session:
+            await repo.add_spend_events(session, job_id, events)
+            await repo.set_job_cost(session, job_id, by_stage={e.stage: 0.0 for e in events if e.stage})
+    except Exception:  # noqa: BLE001 - degrade, don't die
+        log.warning("late spend for paused job %s not recorded", job_id, exc_info=True)
 
 
 async def _invoke(graph, init: dict, config: dict, resume: bool, *, checkpointed: bool, fresh: bool = False) -> dict:

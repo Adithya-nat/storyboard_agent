@@ -562,3 +562,124 @@ async def test_the_failure_marker_survives_a_failed_save_of_the_retried_line(art
     monkeypatch.setattr(store, "save_bytes", real_save)
     await voice_lines([(1, "one")], deps)
     assert not store.exists("narration_01.failed") and len(tries) == 3
+
+
+# --- Instant pause: the user never waits for the current step ---------------- #
+async def test_pause_stops_a_slow_stage_at_once_and_resume_finishes(stub_video, monkeypatch):
+    import asyncio
+
+    from app.agents.brief import brief as real_brief
+    from app.workers.runner import run_job
+
+    calls: list[int] = []
+
+    async def slow_brief(state, deps):
+        calls.append(1)
+        if len(calls) == 1:
+            await asyncio.sleep(60)  # a long LLM step the user shouldn't have to sit through
+        return await real_brief(state, deps)
+
+    monkeypatch.setattr("app.graph.build.brief", slow_brief)
+    async with get_sessionmaker()() as s:
+        job = await repo.create_job(s, "a frog kingdom in a pond", 30)
+    runner = asyncio.create_task(run_job(job.id, job.prompt, 30))
+    while not calls:
+        await asyncio.sleep(0.01)
+
+    async with get_sessionmaker()() as s:
+        assert await repo.request_pause(s, job.id)
+    control.signal_pause(job.id)
+    await asyncio.wait_for(runner, timeout=2)  # parked right away, not after the step
+
+    async with get_sessionmaker()() as s:
+        parked = await repo.get_job(s, job.id)
+        stages = {st.name: st for st in await repo.get_stages(s, job.id)}
+    assert parked.status == JobStatus.PAUSED.value
+    assert stages["brief"].status == "paused"
+
+    await run_job(job.id, job.prompt, 30, resume=True)
+    async with get_sessionmaker()() as s:
+        assert (await repo.get_job(s, job.id)).status == JobStatus.COMPLETED.value
+    assert len(calls) == 2  # the interrupted step was redone once
+
+
+async def test_a_paid_call_in_flight_lands_after_the_pause_and_is_never_rebilled(tmp_path):
+    import asyncio
+
+    from app.observability.usage import UsageCollector, bind_collector, record_spend, reset_collector
+    from app.workers.runner import _book_late_spend, _drive
+
+    job_id = await _job(JobStatus.RUNNING)
+    ctl = RunControl(job_id, get_sessionmaker())
+    clip = tmp_path / "motion_01.mp4"
+    submitted: list[int] = []
+
+    async def render() -> None:
+        submitted.append(1)
+        await asyncio.sleep(0.3)  # the provider is still rendering when the user pauses
+        clip.write_bytes(b"MP4")
+        record_spend(category="video", model="omni", cost_usd=0.5)
+
+    class _Graph:
+        async def ainvoke(self, init, config=None):
+            if not clip.exists():  # a stage skips work that's already on disk
+                await ctl.keep(render, "motion", 1)
+            await asyncio.sleep(0)
+            return {"ok": True}
+
+    collector = UsageCollector()
+    token = bind_collector(collector)
+    try:
+        run = asyncio.create_task(_drive(_Graph(), {"job_id": job_id}, {}, False, checkpointed=False, control=ctl))
+        while not submitted:
+            await asyncio.sleep(0.01)
+        async with get_sessionmaker()() as s:
+            assert await repo.request_pause(s, job_id)
+        control.signal_pause(job_id)
+        final, paused = await asyncio.wait_for(run, timeout=0.2)  # no wait for the render
+        assert paused is not None and not clip.exists()
+        assert control.in_flight(job_id) == {"motion": [1]}  # shown as still landing
+
+        await _book_late_spend(job_id, collector)
+    finally:
+        reset_collector(token)
+    assert clip.exists()  # kept, not thrown away
+    async with get_sessionmaker()() as s:
+        assert (await repo.get_job(s, job_id)).cost_usd == pytest.approx(0.5)
+
+    async with get_sessionmaker()() as s:
+        await repo.set_status(s, job_id, JobStatus.RUNNING)
+    final, paused = await _drive(_Graph(), {"job_id": job_id}, {}, True, checkpointed=False,
+                                 control=RunControl(job_id, get_sessionmaker()))
+    assert final == {"ok": True} and submitted == [1]  # resume reused the clip
+    control.forget(job_id)
+
+
+async def test_resume_waits_for_a_clip_still_landing_instead_of_paying_again(tmp_path):
+    import asyncio
+
+    from app.workers.runner import _drive
+
+    job_id = await _job(JobStatus.RUNNING)
+    clip = tmp_path / "motion_01.mp4"
+    submitted: list[int] = []
+
+    async def render() -> None:
+        submitted.append(1)
+        await asyncio.sleep(0.2)
+        clip.write_bytes(b"MP4")
+
+    ctl = RunControl(job_id, get_sessionmaker())
+    landing = asyncio.create_task(ctl.keep(render, "motion", 1))
+    await asyncio.sleep(0.01)
+    landing.cancel()  # the old run was paused mid-render
+
+    class _Graph:
+        async def ainvoke(self, init, config=None):
+            if not clip.exists():
+                await ctl.keep(render, "motion", 1)
+            return {"ok": True}
+
+    final, paused = await _drive(_Graph(), {"job_id": job_id}, {}, True, checkpointed=False, control=ctl)
+    assert final == {"ok": True} and submitted == [1]
+    control.forget(job_id)

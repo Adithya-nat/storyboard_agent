@@ -29,7 +29,7 @@ class JobStatus(str, Enum):
     COMPLETED_WITH_WARNINGS = "completed_with_warnings"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
-    PAUSING = "pausing"  # pause requested; in-flight paid units are finishing
+    PAUSING = "pausing"  # pause requested; the runner parks it within moments
     PAUSED = "paused"    # parked; resume continues from the first unfinished unit
 
 

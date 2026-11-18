@@ -10,7 +10,7 @@ import asyncio
 import re
 
 from app.adapters.errors import ProviderError
-from app.workers.control import JobPaused, PauseRequested, gate
+from app.workers.control import JobPaused, PauseRequested, gate, keep
 from app.core.logging import get_logger
 from app.graph.state import Deps, StoryboardState
 from app.prompts import render
@@ -96,16 +96,20 @@ async def _build_cast(
             try:
                 async with sem:
                     await gate(deps)
-                    img = await asyncio.to_thread(deps.image.generate_image, prompt, refs=refs)
+                    img, path = await keep(deps, lambda: _draw(name, prompt, refs))
             except PauseRequested:
                 held_sheets.append(name)
                 break
             except ProviderError as exc:
                 warnings.append(f"designer: {char.name} reference sheet failed ({exc}); text-only for that view")
                 continue
-            paths.append(store.save_bytes(name, img))
+            paths.append(path)
             anchor = anchor or img
         return char.name.upper(), paths
+
+    async def _draw(name: str, prompt: str, refs: list[bytes]) -> tuple[bytes, str]:
+        img = await asyncio.to_thread(deps.image.generate_image, prompt, refs=refs)
+        return img, store.save_bytes(name, img)  # saved at once: a pause can't lose it
 
     results = await asyncio.gather(*(one(c) for c in cast))
     if held_sheets:
@@ -134,17 +138,20 @@ async def _build_locations(shotlist: Shotlist, style_ref: bytes | None, deps: De
         if store.exists(name):
             return tag, store.abspath(name)
         prompt = render("designer/location_plate", tag=tag, look=look, style_bible=shotlist.style_bible[:1500])
+        async def draw() -> str:
+            img = await asyncio.to_thread(deps.image.generate_image, prompt, refs=[b for b in (style_ref,) if b])
+            return store.save_bytes(name, img)  # saved at once: a pause can't lose it
+
         try:
             async with sem:
                 await gate(deps)
-                img = await asyncio.to_thread(deps.image.generate_image, prompt, refs=[b for b in (style_ref,) if b])
+                return tag, await keep(deps, draw)
         except PauseRequested:
             held_plates.append(tag)
             return tag, None
         except ProviderError as exc:
             warnings.append(f"designer: location plate {tag} failed ({exc}); text-only set for that place")
             return tag, None
-        return tag, store.save_bytes(name, img)
 
     results = await asyncio.gather(*(one(t, specs[t].look if t in specs else t) for t in sorted(used)))
     if held_plates:
