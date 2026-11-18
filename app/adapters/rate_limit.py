@@ -114,12 +114,10 @@ def reset_image_limiter() -> None:
 
 def get_tts_limiter(rate_per_minute: float, *, model: str = "") -> TokenBucket:
     """Return the shared TTS-call limiter for ``model`` — a SEPARATE ceiling from image
-    and from every other TTS model (each TTS model is its own 10 RPM quota).
+    and from every other TTS model (each TTS model has its own per-minute quota).
 
-    ``capacity=1.0`` on PURPOSE (no burst): a burst can trip a fixed-window
-    10/min quota even when the average is safe, and throughput is irrelevant for
-    a background narration job — so we err all the way toward margin and pace
-    strictly one call at a time."""
+    ``capacity=1.0`` on PURPOSE (no burst): a burst can trip a fixed-window quota
+    even when the average is safe, so calls are paced strictly one at a time."""
     return _get_or_create(f"tts:{model}" if model else "tts", rate_per_minute, capacity=1.0)
 
 
@@ -132,7 +130,7 @@ def reset_tts_limiter() -> None:
 
 def get_text_limiter(rate_per_minute: float) -> TokenBucket:
     """Shared limiter for ALL text-model calls (script, reflection, judge, designer,
-    publish kit). Gemini 4 is 30 RPM on this account, so the default 25 keeps margin;
+    publish kit). The default stays well under the account's text-model RPM;
     a small burst (capacity = max(1, rpm/10)) keeps the reflection loop snappy."""
     return _get_or_create("text", rate_per_minute)
 

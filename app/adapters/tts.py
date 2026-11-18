@@ -128,7 +128,7 @@ class GeminiTTSAdapter:
         return retrying(self._synthesize_once, model, content, speech_config)
 
     def _synthesize_once(self, model: str, content, speech_config) -> bytes:
-        # RPM guard: pace calls UNDER this model's 10 RPM cap (capacity=1, no burst).
+        # RPM guard: pace calls under this model's per-minute cap (capacity=1, no burst).
         get_tts_limiter(self.settings.tts_rpm_limit, model=model).acquire()
         try:
             interaction = interactions_create(

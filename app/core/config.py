@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     judge_temperature: float | None = None
     designer_temperature: float | None = None
     publish_temperature: float | None = None
-    # Shared pacing for ALL text-model calls (Gemini 4 is 30 RPM on this account; 25 = margin).
-    text_rpm_limit: int = 25
+    # Shared pacing for ALL text-model calls (Gemini 4 / 3.8 Flash are 2K RPM at Paid Tier 2).
+    text_rpm_limit: int = 300
     # Per-request HTTP timeout for text calls (Gemini 4 Carbon can think for minutes).
     llm_timeout_seconds: float = 600.0
     # Validate every configured model id against models.list() once at startup.
@@ -92,14 +92,16 @@ class Settings(BaseSettings):
     # --- Monthly AI budget guard (app-side estimate; Google/Anthropic billing is authoritative) ---
     monthly_budget_usd: float = 300.0
     # Google's spend-based rate limit per rolling 10 min (Tier 1 = $10, Tier 2+ = $200).
-    spend_rate_limit_usd_per_10min: float = 9.0
+    # Pacing only; the monthly budget above is the real spend cap.
+    spend_rate_limit_usd_per_10min: float = 180.0
     budget_mode: str = "block"   # block -> 402 when over; degrade -> run without Omni
     budget_warn_fraction: float = 0.8
     # Per-beat hold = max(narration_floor_seconds, audio_length + narration_pad_seconds).
     narration_floor_seconds: float = 1.5
     narration_pad_seconds: float = 0.4
-    # TTS is a HARD 10 RPM / 100 RPD per-model quota. A shared token bucket paces
-    tts_rpm_limit: int = 8  # < 10, with margin; the TTS bucket uses capacity=1 (no burst)
+    # Per-model TTS quota (3.8 Flash TTS: 1K RPM / 10K RPD at Paid Tier 2). A shared token
+    # bucket paces calls one at a time (capacity=1, no burst).
+    tts_rpm_limit: int = 120
     tts_max_retries: int = 5  # transient 429/5xx attempts before a beat degrades to silence
     # Cap the honored retryDelay: a DAILY-quota 429 can carry a huge delay, and we must
     tts_retry_cap_seconds: float = 20.0
@@ -133,9 +135,9 @@ class Settings(BaseSettings):
     video_width: int = 1080
     video_height: int = 1920
     # Bounded concurrency: at most this many image calls in flight (asyncio.Semaphore).
-    image_max_concurrency: int = 4
+    image_max_concurrency: int = 8
     # Global RPM ceiling enforced by a shared token bucket across ALL image calls
-    image_rpm_limit: int = 60
+    image_rpm_limit: int = 240  # Nano Banana Pro: 500 RPM at Paid Tier 2
 
     # --- Frame scaling (Phase 2) ---
     # Frame count = round(duration / seconds_per_frame). At 2.0s: 30s -> 15 frames,
@@ -233,8 +235,8 @@ class Settings(BaseSettings):
     ai_video_retry_delay_seconds: float = 90.0
     omni_model_chain: Annotated[list[str], NoDecode] = ["gemini-omni-1.2-flash", "gemini-omni-1.1-flash"]
     omni_resolution: str = "1080p"       # 360p | 720p | 1080p | 4k
-    omni_rpm_limit: int = 8
-    omni_max_concurrency: int = 4
+    omni_rpm_limit: int = 14             # Omni 1.2 Flash: 16 RPM / 200 RPD at Paid Tier 2
+    omni_max_concurrency: int = 6
     omni_timeout_seconds: float = 600.0
     omni_speaker_check: bool = True      # re-render a dialogue clip once if a voice is wrong
     film_review_enabled: bool = True     # a model watches the finished film and scores coherence
