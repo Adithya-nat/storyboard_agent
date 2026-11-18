@@ -642,3 +642,30 @@ async def list_runs(
     if user_id is not None:
         q = q.where(RunLedger.user_id == user_id)
     return list((await session.execute(q)).scalars().all())
+
+
+# --- Usage insights ------------------------------------------------------------------ #
+async def spend_rows(session: AsyncSession) -> list:
+    """Every spend event's (user_id, stage, category, cost_usd, units, job_id), all time, all users.
+    Columns only: the insights page folds these in Python (JSON units differ by backend)."""
+    q = select(SpendEvent.user_id, SpendEvent.stage, SpendEvent.category, SpendEvent.cost_usd, SpendEvent.units,
+               SpendEvent.job_id)
+    return list((await session.execute(q)).all())
+
+
+async def library_rows(session: AsyncSession) -> list:
+    from app.db.models import LibraryFilm
+
+    q = select(LibraryFilm).where(LibraryFilm.status == "published").order_by(LibraryFilm.published_at.desc())
+    return list((await session.execute(q)).scalars().all())
+
+
+async def stage_timings(session: AsyncSession) -> list:
+    """(user_id, stage, seconds) for every finished stage of the jobs still on disk (jobs
+    are swept after 24h, so this covers recent runs only)."""
+    q = (
+        select(Job.user_id, JobStage.name, JobStage.started_at, JobStage.ended_at)
+        .join(Job, Job.id == JobStage.job_id)
+        .where(JobStage.started_at.is_not(None), JobStage.ended_at.is_not(None), JobStage.status == "succeeded")
+    )
+    return [(u, n, (e - s).total_seconds()) for u, n, s, e in (await session.execute(q)).all() if e >= s]

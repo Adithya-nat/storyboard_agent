@@ -119,3 +119,83 @@ async def test_degrade_mode_refuses_when_ai_video_is_required(client, small_budg
     await _spend("old-3", 7.0)
     r = await client.post("/storyboard", json={"prompt": "a test story", "duration": 30, "style": "dialogue"})
     assert r.status_code == 402  # never a stills-only film
+
+
+# --- Insights ------------------------------------------------------------------------ #
+from datetime import date, timedelta  # noqa: E402
+
+from app.api.usage import ahead_of, streaks  # noqa: E402
+
+
+def test_streaks_count_consecutive_days_and_survive_until_tomorrow():
+    t = date(2026, 11, 18)
+    days = {t - timedelta(days=i) for i in (1, 2, 3)} | {t - timedelta(days=10), t - timedelta(days=11)}
+    assert streaks(days, t) == (3, 3)  # made something yesterday: the streak is still alive
+    assert streaks(days | {t}, t) == (4, 4)
+    assert streaks({t - timedelta(days=5)}, t) == (0, 1)
+    assert streaks(set(), t) == (0, 0)
+
+
+def test_ahead_of_counts_strictly_better_others():
+    assert ahead_of(5, [1, 5, 9]) == round(1 / 3, 4)
+    assert ahead_of(0.2, [0.1, 0.3, 0.4], lower_is_better=True) == round(2 / 3, 4)
+    assert ahead_of(None, [1]) is None and ahead_of(1, []) is None
+
+
+async def _film(job_id: str, *, user: str | None = None, usd: float = 5.0, score: int | None = 60,
+                started: datetime | None = None, seconds: float = 30.0, status: str = "completed"):
+    async with get_sessionmaker()() as s:
+        await repo.add_spend_events(s, job_id, [
+            SpendEvent(category="video", provider="google", model="omni", cost_usd=usd, stage="motion",
+                       units={"seconds": seconds, "renders": 2}),
+            SpendEvent(category="text", provider="google", model="flash", cost_usd=0.1, stage="script_writer",
+                       units={"output_tokens": 400}),
+        ])
+        if user is not None:  # spend events take their user from the job's context in prod
+            from sqlalchemy import update as sa_update
+
+            from app.db.models import SpendEvent as Row
+            await s.execute(sa_update(Row).where(Row.job_id == job_id).values(user_id=user))
+            await s.commit()
+        await repo.upsert_run(s, job_id, user_id=user, prompt="p", style="dialogue", duration=30, status=status,
+                              cost_usd=usd + 0.1, scenes=4, omni_scenes=2, film_score=score, judge_score=90,
+                              runtime_seconds=600, started_at=started or datetime.now(timezone.utc),
+                              finished_at=datetime.now(timezone.utc))
+
+
+async def test_insights_studio_stats(client):
+    now = datetime.now(timezone.utc)
+    await _film("f-1", started=now - timedelta(days=1), score=50)
+    await _film("f-2", started=now, score=70)
+    await _film("f-x", started=now, status="failed", score=None, seconds=99)
+    body = (await client.get("/usage/insights?tz=America/Los_Angeles")).json()
+    assert body["tz"] == "America/Los_Angeles" and body["rank"] is None  # local mode: no rank
+    me = body["me"]
+    assert (me["runs"], me["films"], me["screen_seconds"], me["scenes"], me["ai_scenes"]) == (3, 2, 60, 8, 4)
+    assert me["renders"] == 6 and me["rendered_seconds"] == 159.0
+    # finished films only: 60s rendered for 2 x (30s x half AI) = 30s kept -> 2:1
+    assert me["shooting_ratio"] == 2.0
+    assert [f["film_score"] for f in me["timeline"]] == [50, 70] and me["timeline"][0]["job_id"] == "f-1"
+    assert body["all"]["timeline"][0]["job_id"] is None  # no ids in the project view
+    assert me["current_streak"] >= 1 and me["active_days"] >= 1
+    assert sum(map(sum, me["punchcard"])) == 3 and len(me["punchcard"]) == 7
+    assert [s["stage"] for s in me["stages"]][:2] == ["script_writer", "motion"]  # pipeline order
+    assert me["sweet_spots"] == [{"key": "dialogue_30", "films": 2, "avg_cost_usd": 5.1,
+                                  "avg_film_score": 60.0, "avg_judge_score": 90.0}]
+    assert me["outcomes"] == {"completed": 2, "failed": 1}
+
+
+async def test_insights_bad_timezone_falls_back_to_utc(client):
+    assert (await client.get("/usage/insights?tz=Not/AZone")).json()["tz"] == "UTC"
+
+
+async def test_insights_rank_needs_three_creators(client, monkeypatch):
+    from app.core import auth
+
+    for uid, n, score in (("u-me", 3, 80), ("u-b", 1, 60), ("u-c", 2, 90)):
+        for i in range(n):
+            await _film(f"{uid}-{i}", user=uid, score=score, usd=5.0 if uid == "u-me" else 9.0)
+    monkeypatch.setattr(auth.User, "scope", property(lambda self: "u-me"))
+    body = (await client.get("/usage/insights")).json()
+    assert body["me"]["films"] == 3 and body["all"]["films"] == 6 and body["all"]["creators"] == 3
+    assert body["rank"] == {"creators": 3, "films": 1.0, "score": 0.5, "value": 1.0}
